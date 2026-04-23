@@ -1,4 +1,5 @@
 require('dotenv').config();
+const shared = require('./shared');
 const {
   Client, GatewayIntentBits, PermissionsBitField,
   ButtonBuilder, ButtonStyle, ActionRowBuilder,
@@ -28,11 +29,10 @@ const ROLES = {
   tag:  "1492569134385467512"
 };
 
-const PREFIX = "oxy";
-const warns = new Map();
-const embedSessions = new Map();
-const activeGiveaways = new Map();
+shared.setClient(client);
 
+const PREFIX        = "oxy";
+const embedSessions = new Map();
 const LOG_CHANNEL_ID = "1493101729703657662";
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────────
@@ -133,6 +133,11 @@ client.on('messageCreate', async message => {
 
 client.on('messageDelete', async message => {
   if (message.author?.bot) return;
+  shared.addLog('deleted', {
+    author: message.author?.tag || 'Inconnu', authorId: message.author?.id,
+    channel: message.channel?.name, channelId: message.channel?.id,
+    content: message.content || '*Non disponible*',
+  });
   const logChannel = getLogChannel();
   if (!logChannel) return;
   const embed = new EmbedBuilder()
@@ -150,6 +155,12 @@ client.on('messageDelete', async message => {
 client.on('messageUpdate', async (oldMessage, newMessage) => {
   if (oldMessage.author?.bot) return;
   if (oldMessage.content === newMessage.content) return;
+  shared.addLog('edited', {
+    author: oldMessage.author?.tag || 'Inconnu', authorId: oldMessage.author?.id,
+    channel: oldMessage.channel?.name, channelId: oldMessage.channel?.id,
+    before: oldMessage.content || '*Non disponible*',
+    after: newMessage.content || '*Non disponible*', url: newMessage.url,
+  });
   const logChannel = getLogChannel();
   if (!logChannel) return;
   const embed = new EmbedBuilder()
@@ -174,6 +185,11 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
   const added   = newRoles.filter(r => !oldRoles.has(r.id));
   const removed = oldRoles.filter(r => !newRoles.has(r.id));
   if (added.size === 0 && removed.size === 0) return;
+  shared.addLog('roles', {
+    member: newMember.user.tag, memberId: newMember.id,
+    added: [...added.values()].map(r => r.name),
+    removed: [...removed.values()].map(r => r.name),
+  });
   const lines = [];
   added.forEach(r   => lines.push(`➕ Rôle ajouté : **${r.name}** (<@&${r.id}>)`));
   removed.forEach(r => lines.push(`➖ Rôle retiré : **${r.name}** (<@&${r.id}>)`));
@@ -194,7 +210,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
   if (reaction.emoji.name !== '🎉') return;
-  const gw = activeGiveaways.get(reaction.message.id);
+  const gw = shared.activeGiveaways.get(reaction.message.id);
   if (!gw || !gw.requiredRoleId) return;
   const guild  = reaction.message.guild;
   const member = await getMember(guild, user.id);
@@ -235,6 +251,8 @@ client.on('messageCreate', async message => {
         return message.reply("❌ Je n'ai pas la permission de bannir.");
       try {
         await message.guild.members.ban(userId, { reason });
+        shared.stats.bans++;
+        shared.broadcast({ type: 'action', action: 'ban', userId, reason, by: message.author.tag });
         message.reply(`✅ <@${userId}> a été banni. | Raison : ${reason}`);
       } catch (err) {
         console.error('[BAN]', err);
@@ -252,6 +270,8 @@ client.on('messageCreate', async message => {
       if (!member) return message.reply("❌ Membre introuvable.");
       try {
         await member.kick(reason);
+        shared.stats.kicks++;
+        shared.broadcast({ type: 'action', action: 'kick', userId, reason, by: message.author.tag });
         message.reply(`👢 <@${userId}> a été kick. | Raison : ${reason}`);
       } catch (err) {
         console.error('[KICK]', err);
@@ -285,6 +305,8 @@ client.on('messageCreate', async message => {
       if (!member) return message.reply("❌ Membre introuvable.");
       try {
         await member.timeout(duration * 60 * 1000, muteReason);
+        shared.stats.mutes++;
+        shared.broadcast({ type: 'action', action: 'mute', userId, duration, by: message.author.tag });
         message.reply(`🔇 <@${userId}> mute **${duration} min**. | Raison : ${muteReason}`);
       } catch (err) {
         console.error('[MUTE]', err);
@@ -311,9 +333,9 @@ client.on('messageCreate', async message => {
     // ── WARN ─────────────────────────────────────────────────────────────────
     case "warn": {
       if (!userId) return missingArg(message, "Donne un ID utilisateur.");
-      const userWarns = warns.get(userId) || [];
+      const userWarns = shared.warns.get(userId) || [];
       userWarns.push({ reason, date: new Date().toLocaleString("fr-FR") });
-      warns.set(userId, userWarns);
+      shared.warns.set(userId, userWarns);
       message.reply(`⚠️ <@${userId}> warn (total : **${userWarns.length}**). | Raison : ${reason}`);
       break;
     }
@@ -321,7 +343,7 @@ client.on('messageCreate', async message => {
     // ── WARNS LIST ───────────────────────────────────────────────────────────
     case "warns": {
       if (!userId) return missingArg(message, "Donne un ID utilisateur.");
-      const userWarns = warns.get(userId);
+      const userWarns = shared.warns.get(userId);
       if (!userWarns || userWarns.length === 0) return message.reply(`✅ <@${userId}> n'a aucun warn.`);
       const list = userWarns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.date}*`).join("\n");
       message.reply(`📋 Warns de <@${userId}> (${userWarns.length}) :\n${list}`);
@@ -408,6 +430,23 @@ client.on('messageCreate', async message => {
       if (!amount || amount < 1 || amount > 50) return missingArg(message, "Donne un nombre entre 1 et 50.");
       if (!targetId) return missingArg(message, "Donne un ID utilisateur.");
       for (let i = 0; i < amount; i++) await message.channel.send(`<@${targetId}>`);
+      break;
+    }
+
+    // ── SAY ──────────────────────────────────────────────────────────────────
+    case "say": {
+      const sayChannelId = args[2];
+      const sayMessage   = args.slice(3).join(" ");
+      if (!sayChannelId) return missingArg(message, "Donne un ID de salon.");
+      if (!sayMessage)   return missingArg(message, "Donne un message à envoyer.");
+      try {
+        const channel = await client.channels.fetch(sayChannelId);
+        await channel.send(sayMessage);
+        message.reply(`✅ Message envoyé dans <#${sayChannelId}>.`);
+      } catch (err) {
+        console.error('[SAY]', err);
+        message.reply(`❌ Impossible d'envoyer le message : \`${err.message}\``);
+      }
       break;
     }
 
@@ -565,57 +604,33 @@ client.on('messageCreate', async message => {
       const gwMsg = await message.channel.send({ embeds: [gwEmbed] });
       await gwMsg.react("🎉");
 
-      activeGiveaways.set(gwMsg.id, { prize, requiredRoleId, channelId: message.channel.id });
+      shared.activeGiveaways.set(gwMsg.id, { prize, requiredRoleId, channelId: message.channel.id, messageId: gwMsg.id, endsAt: endsAt.toISOString(), launchedBy: message.author.tag });
       message.delete().catch(() => {});
 
       setTimeout(async () => {
-        activeGiveaways.delete(gwMsg.id);
+        shared.activeGiveaways.delete(gwMsg.id);
         try {
           const fetched  = await gwMsg.fetch();
           const reaction = fetched.reactions.cache.get("🎉");
           if (!reaction) return message.channel.send("❌ Impossible de récupérer les réactions.");
-
           const users  = await reaction.users.fetch();
           let eligible = users.filter(u => !u.bot);
-
           if (requiredRoleId) {
-            const checks = await Promise.all(
-              [...eligible.values()].map(async u => {
-                const m = await getMember(message.guild, u.id);
-                return m?.roles.cache.has(requiredRoleId) ? u : null;
-              })
-            );
+            const checks = await Promise.all([...eligible.values()].map(async u => { const m = await getMember(message.guild, u.id); return m?.roles.cache.has(requiredRoleId) ? u : null; }));
             eligible = eligible.filter((_, i) => checks[i] !== null);
           }
-
           if (eligible.size === 0) {
-            const noWinEmbed = new EmbedBuilder()
-              .setTitle("😢 Giveaway terminé")
-              .setDescription(`**Prix :** ${prize}\n\nPersonne d'éligible n'a participé.`)
-              .setColor(0xE24B4A);
+            const noWinEmbed = new EmbedBuilder().setTitle("😢 Giveaway terminé").setDescription(`**Prix :** ${prize}\n\nPersonne d'éligible n'a participé.`).setColor(0xE24B4A);
             await gwMsg.edit({ embeds: [noWinEmbed] });
+            shared.endedGiveaways.set(gwMsg.id, { prize, requiredRoleId, channelId: message.channel.id, messageId: gwMsg.id, winner: null, winnerTag: null, eligible: 0 });
             return message.channel.send({ embeds: [noWinEmbed] });
           }
-
           const winner = eligible.random();
-          const endedEmbed = new EmbedBuilder()
-            .setTitle("🎉  GIVEAWAY — TERMINÉ")
-            .setDescription(`**Prix :** ${prize}\n\n**Gagnant :** <@${winner.id}>\n\n*Le giveaway est terminé.*`)
-            .setColor(0x57F287)
-            .setFooter({ text: `Lancé par ${message.author.tag}` })
-            .setTimestamp();
-          await gwMsg.edit({ embeds: [endedEmbed] });
-
-          const winEmbed = new EmbedBuilder()
-            .setTitle("🎊 Félicitations !")
-            .setDescription(`<@${winner.id}> remporte **${prize}** !`)
-            .setColor(0x57F287);
-          message.channel.send({ content: `<@${winner.id}>`, embeds: [winEmbed] });
-
-        } catch (err) {
-          console.error('[GIVEAWAY]', err);
-          message.channel.send(`❌ Erreur giveaway : \`${err.message}\``);
-        }
+          await gwMsg.edit({ embeds: [new EmbedBuilder().setTitle("🎉 GIVEAWAY — TERMINÉ").setDescription(`**Prix :** ${prize}\n\n**Gagnant :** <@${winner.id}>`).setColor(0x57F287).setFooter({ text: `Lancé par ${message.author.tag}` }).setTimestamp()] });
+          message.channel.send({ content: `<@${winner.id}>`, embeds: [new EmbedBuilder().setTitle("🎊 Félicitations !").setDescription(`<@${winner.id}> remporte **${prize}** !`).setColor(0x57F287)] });
+          shared.endedGiveaways.set(gwMsg.id, { prize, requiredRoleId, channelId: message.channel.id, messageId: gwMsg.id, winner: winner.id, winnerTag: winner.tag, eligible: eligible.size });
+          shared.broadcast({ type: 'giveaway_end', prize, winner: winner.tag });
+        } catch (err) { console.error('[GIVEAWAY]', err); message.channel.send(`❌ Erreur giveaway : \`${err.message}\``); }
       }, ms);
       break;
     }
@@ -673,6 +688,7 @@ client.on('messageCreate', async message => {
             "*Durées : `30s` `10m` `2h` `1d`*",
           ].join("\n")},
           { name: "Utilitaire", value: [
+            "`oxy say <idSalon> <message>` — Faire parler le bot dans un salon",
             "`oxy spam ping <1-50> <id>` — Spam ping",
             "`oxy dm <id> <message>` — Envoyer un DM",
             "`oxy embed` — Créer un embed interactif 🆕",
