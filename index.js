@@ -31,9 +31,10 @@ const ROLES = {
 
 shared.setClient(client);
 
-const PREFIX        = "oxy";
-const embedSessions = new Map();
+const PREFIX         = "oxy";
+const embedSessions  = new Map();
 const LOG_CHANNEL_ID = "1493101729703657662";
+const LIVE_CHANNEL_ID = "1496971161295388792";
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -433,19 +434,25 @@ client.on('messageCreate', async message => {
       break;
     }
 
-    // ── SAY ──────────────────────────────────────────────────────────────────
-    case "say": {
-      const sayChannelId = args[2];
-      const sayMessage   = args.slice(3).join(" ");
-      if (!sayChannelId) return missingArg(message, "Donne un ID de salon.");
-      if (!sayMessage)   return missingArg(message, "Donne un message à envoyer.");
+    // ── LIVE ─────────────────────────────────────────────────────────────────
+    case "live": {
       try {
-        const channel = await client.channels.fetch(sayChannelId);
-        await channel.send(sayMessage);
-        message.reply(`✅ Message envoyé dans <#${sayChannelId}>.`);
+        const liveChannel = await client.channels.fetch(LIVE_CHANNEL_ID);
+        const embed = new EmbedBuilder()
+          .setTitle("🔴 oxy30k est en LIVE sur TikTok !")
+          .setDescription(
+            "**@oxy30k** est en live maintenant !\n\n" +
+            "[👉 Rejoindre le live](https://www.tiktok.com/@oxy30k/live)\n\n" +
+            "*Viens faire un tour, ça sera cool 🔥*"
+          )
+          .setColor(0xFE2C55)
+          .setTimestamp()
+          .setFooter({ text: "TikTok Live • oxy30k" });
+        await liveChannel.send({ content: "@everyone", embeds: [embed] });
+        message.reply(`✅ Notif live envoyée dans <#${LIVE_CHANNEL_ID}> !`);
       } catch (err) {
-        console.error('[SAY]', err);
-        message.reply(`❌ Impossible d'envoyer le message : \`${err.message}\``);
+        console.error('[LIVE]', err);
+        message.reply(`❌ Erreur : \`${err.message}\``);
       }
       break;
     }
@@ -688,7 +695,7 @@ client.on('messageCreate', async message => {
             "*Durées : `30s` `10m` `2h` `1d`*",
           ].join("\n")},
           { name: "Utilitaire", value: [
-            "`oxy say <idSalon> <message>` — Faire parler le bot dans un salon",
+            "`oxy live` — Envoyer la notif live TikTok 🆕",
             "`oxy spam ping <1-50> <id>` — Spam ping",
             "`oxy dm <id> <message>` — Envoyer un DM",
             "`oxy embed` — Créer un embed interactif 🆕",
