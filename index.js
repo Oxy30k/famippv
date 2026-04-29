@@ -14,9 +14,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.DirectMessages,
   ],
-  partials: ['CHANNEL'], // requis pour recevoir les DMs
 });
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
@@ -38,17 +36,6 @@ const embedSessions  = new Map();
 const LOG_CHANNEL_ID = "1493101729703657662";
 const LIVE_CHANNEL_ID = "1496971161295388792";
 
-// ─── MODMAIL CONFIG ────────────────────────────────────────────────────────────
-// ⚠️  Remplace ces deux IDs par les tiens :
-//   MODMAIL_GUILD_ID    → ID de ton serveur Discord
-//   MODMAIL_CATEGORY_ID → ID de la catégorie où créer les salons mail-xxxx
-const MODMAIL_GUILD_ID    = "1364065987741351956";
-const MODMAIL_CATEGORY_ID = "1498931758022791250";
-
-// userId  → channelId  (ticket ouvert par cet user)
-const mailByUser    = new Map();
-// channelId → userId  (à qui appartient ce salon)
-const mailByChannel = new Map();
 
 // ─── AUTOMOD CONFIG ────────────────────────────────────────────────────────────
 
@@ -170,122 +157,6 @@ client.on('messageCreate', async message => {
     await member.roles.add(PING_ROLE_ID);
   } catch (err) {
     console.error('[AUTO-ROLE]', err);
-  }
-});
-
-
-// ─── MODMAIL — RÉCEPTION DES DMS ──────────────────────────────────────────────
-
-client.on('messageCreate', async message => {
-  // On ne traite que les DMs envoyés au bot
-  if (message.author.bot) return;
-  if (message.guild) return; // ignore les messages serveur ici
-
-  const userId  = message.author.id;
-  const content = message.content;
-  const guild   = await client.guilds.fetch(MODMAIL_GUILD_ID).catch(() => null);
-  if (!guild) return;
-
-  // ── Ticket déjà ouvert : on forward le nouveau message ──────────────────────
-  if (mailByUser.has(userId)) {
-    const channel = guild.channels.cache.get(mailByUser.get(userId));
-    if (!channel) { mailByUser.delete(userId); return; }
-
-    const embed = new EmbedBuilder()
-      .setAuthor({ name: `${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
-      .setDescription(content || '*[Pas de texte]*')
-      .setColor(0x5865F2)
-      .setFooter({ text: `ID : ${userId}` })
-      .setTimestamp();
-
-    if (message.attachments.size > 0) {
-      embed.setImage(message.attachments.first().url);
-    }
-
-    await channel.send({ embeds: [embed] }).catch(console.error);
-    await message.react('✅').catch(() => {});
-    return;
-  }
-
-  // ── Nouveau ticket : on crée le salon ────────────────────────────────────────
-  const safeName = message.author.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'user';
-  let channel;
-  try {
-    channel = await guild.channels.create({
-      name: `mail-${safeName}`,
-      type: 0, // GUILD_TEXT
-      parent: MODMAIL_CATEGORY_ID,
-      topic: `Modmail de ${message.author.tag} (${userId})`,
-      reason: 'Nouveau ticket modmail',
-    });
-  } catch (err) {
-    console.error('[MODMAIL CREATE]', err);
-    return message.author.send('❌ Impossible d\'ouvrir un ticket pour le moment. Réessaie plus tard.').catch(() => {});
-  }
-
-  mailByUser.set(userId, channel.id);
-  mailByChannel.set(channel.id, userId);
-
-  // Embed d'ouverture dans le salon
-  const openEmbed = new EmbedBuilder()
-    .setTitle('📬 Nouveau ticket Modmail')
-    .setDescription(
-      `**Utilisateur :** <@${userId}> (${message.author.tag})\n` +
-      `**ID :** \`${userId}\`\n\n` +
-      `**Premier message :**\n${content || '*[Pas de texte]*'}`
-    )
-    .setColor(0x57F287)
-    .setThumbnail(message.author.displayAvatarURL({ size: 128 }))
-    .setFooter({ text: 'Réponds ici pour contacter l\'user • oxy close [raison] pour fermer' })
-    .setTimestamp();
-
-  if (message.attachments.size > 0) openEmbed.setImage(message.attachments.first().url);
-
-  await channel.send({ content: `<@${OWNERS[0]}> <@${OWNERS[1]}>`, embeds: [openEmbed] }).catch(console.error);
-
-  // Confirmation à l'user
-  await message.author.send({
-    embeds: [new EmbedBuilder()
-      .setTitle('📨 Ticket ouvert !')
-      .setDescription('Ton message a bien été reçu. Un owner va te répondre dès que possible.\n\nTu peux continuer à écrire ici pour ajouter des infos.')
-      .setColor(0x57F287)
-      .setFooter({ text: 'oxy bot • Modmail' })
-      .setTimestamp()
-    ]
-  }).catch(() => {});
-
-  await message.react('✅').catch(() => {});
-});
-
-// ─── MODMAIL — RÉPONSE OWNER → USER ──────────────────────────────────────────
-
-client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
-  if (!isOwner(message.author.id)) return;
-  if (!mailByChannel.has(message.channel.id)) return;
-
-  // Ignore les commandes oxy dans le salon modmail
-  if (message.content.trim().toLowerCase().startsWith('oxy')) return;
-
-  const userId = mailByChannel.get(message.channel.id);
-  let targetUser;
-  try { targetUser = await client.users.fetch(userId); } catch { return; }
-
-  const replyEmbed = new EmbedBuilder()
-    .setAuthor({ name: `Staff · ${message.author.username}`, iconURL: message.author.displayAvatarURL() })
-    .setDescription(message.content || '*[Pas de texte]*')
-    .setColor(0xEB459E)
-    .setFooter({ text: 'oxy bot • Modmail — Réponds ici pour continuer' })
-    .setTimestamp();
-
-  if (message.attachments.size > 0) replyEmbed.setImage(message.attachments.first().url);
-
-  try {
-    await targetUser.send({ embeds: [replyEmbed] });
-    await message.react('✅').catch(() => {});
-  } catch {
-    message.reply('❌ Impossible d\'envoyer le DM à cet utilisateur (DMs fermés ?).').catch(() => {});
   }
 });
 
@@ -1162,64 +1033,6 @@ client.on('messageCreate', async message => {
     }
 
 
-    // ── CLOSE MODMAIL ────────────────────────────────────────────────────────
-    case "close": {
-      if (!mailByChannel.has(message.channel.id))
-        return message.reply("❌ Ce salon n\'est pas un ticket modmail.");
-
-      const closeReason = args.slice(2).join(" ") || "Aucune raison fournie";
-      const closedUserId = mailByChannel.get(message.channel.id);
-
-      let targetUser = null;
-      try { targetUser = await client.users.fetch(closedUserId); } catch {}
-
-      // DM à l'user
-      if (targetUser) {
-        await targetUser.send({
-          embeds: [new EmbedBuilder()
-            .setTitle("🔒 Ticket fermé")
-            .setDescription(
-              "Ton ticket a été fermé par un owner.\n\n" +
-              `**Raison :** ${closeReason}\n\n` +
-              "*Si tu as un autre problème, renvoie-moi un DM.*"
-            )
-            .setColor(0xE24B4A)
-            .setFooter({ text: "oxy bot • Modmail" })
-            .setTimestamp()
-          ]
-        }).catch(() => {});
-      }
-
-      // Nettoyage des maps
-      mailByUser.delete(closedUserId);
-      mailByChannel.delete(message.channel.id);
-
-      // Log
-      const closeLogCh = getLogChannel();
-      if (closeLogCh) {
-        closeLogCh.send({ embeds: [new EmbedBuilder()
-          .setTitle("📭 Ticket modmail fermé")
-          .setColor(0xE24B4A)
-          .addFields(
-            { name: "User",      value: targetUser ? `<@${closedUserId}> (${targetUser.tag})` : closedUserId, inline: true },
-            { name: "Fermé par", value: `<@${message.author.id}>`, inline: true },
-            { name: "Raison",    value: closeReason }
-          )
-          .setTimestamp()
-        ]}).catch(console.error);
-      }
-
-      // Confirmation puis suppression du salon
-      await message.channel.send({
-        embeds: [new EmbedBuilder()
-          .setDescription(`🔒 Ticket fermé par <@${message.author.id}>. Suppression dans 5s…`)
-          .setColor(0xE24B4A)
-        ]
-      }).catch(() => {});
-
-      setTimeout(() => message.channel.delete().catch(console.error), 5000);
-      break;
-    }
 
     // ── OWNER ────────────────────────────────────────────────────────────────
     case "owner": {
@@ -1241,30 +1054,29 @@ client.on('messageCreate', async message => {
             "`oxy unmute <id>` — Unmute",
             "`oxy warn <id> [raison]` — Avertir",
             "`oxy warns <id>` — Voir les warns",
-            "`oxy clearwarn <id>` — Reset les warns 🆕",
+            "`oxy clearwarn <id>` — Reset les warns",
             "`oxy clear <1-100>` — Supprimer des messages",
-            "`oxy purge <id> [1-100]` — Supprimer msgs d'un user 🆕",
+            "`oxy purge <id> [1-100]` — Supprimer msgs d'un user",
             "`oxy lock` — Verrouiller le salon",
             "`oxy unlock` — Déverrouiller le salon",
-            "`oxy slowmode <secondes>` — Slowmode 🆕",
+            "`oxy slowmode <secondes>` — Slowmode",
             "`oxy nuke` — 💣 Nuke le salon",
-            "`oxy close [raison]` — Fermer un ticket modmail 🆕",
           ].join("\n")},
           { name: "Rôles & Membres", value: [
             "`oxy role <fami|tag> <id>` — Donner/retirer un rôle",
             "`oxy dmall <message>` — DM tous les membres",
           ].join("\n")},
           { name: "Infos", value: [
-            "`oxy userinfo <id>` — Infos + warns d'un utilisateur 🆕",
+            "`oxy userinfo <id>` — Infos + warns d'un utilisateur",
             "`oxy serverinfo` — Infos du serveur",
-            "`oxy snipe` — Voir le dernier msg supprimé 🆕",
+            "`oxy snipe` — Voir le dernier msg supprimé",
           ].join("\n")},
           { name: "AutoMod (automatique)", value: [
-            "🔗 **Anti-lien scam** — Supprime + mute 30min 🆕",
-            "🤬 **Anti-slur** — Mute progressif (10min/1h/24h) 🆕",
-            "💬 **Anti-spam** — Mute 10min si 5 msgs en 5s 🆕",
-            "📢 **Anti-mass mention** — Supprime si 4+ mentions 🆕",
-            "👻 **Ghost ping alert** — Alerte si ping puis delete 🆕",
+            "🔗 **Anti-lien scam** — Supprime + mute 30min",
+            "🤬 **Anti-slur** — Mute progressif (10min/1h/24h)",
+            "💬 **Anti-spam** — Mute 10min si 5 msgs en 5s",
+            "📢 **Anti-mass mention** — Supprime si 4+ mentions",
+            "👻 **Ghost ping alert** — Alerte si ping puis delete",
             "",
             "`oxy automod <module> <on|off>` — Toggle un module",
             "*Modules : `antilink` `antislur` `antispam` `antimention` `ghostping`*",
@@ -1280,7 +1092,7 @@ client.on('messageCreate', async message => {
             "`oxy dm <id> <message>` — Envoyer un DM",
             "`oxy embed` — Créer un embed interactif",
             "`oxy owner` — Affiche les owners",
-            "`oxy info` — Infos publiques sur le bot 🆕",
+            "`oxy info` — Infos publiques sur le bot",
             "`oxy help` — Cette aide",
           ].join("\n")},
         )
