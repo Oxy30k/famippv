@@ -42,8 +42,8 @@ const LIVE_CHANNEL_ID = "1496971161295388792";
 // ⚠️  Remplace ces deux IDs par les tiens :
 //   MODMAIL_GUILD_ID    → ID de ton serveur Discord
 //   MODMAIL_CATEGORY_ID → ID de la catégorie où créer les salons mail-xxxx
-const MODMAIL_GUILD_ID    = "TON_SERVER_ID_ICI";
-const MODMAIL_CATEGORY_ID = "TON_CATEGORY_ID_ICI";
+const MODMAIL_GUILD_ID    = "1364065987741351956";
+const MODMAIL_CATEGORY_ID = "1498931758022791250";
 
 // userId  → channelId  (ticket ouvert par cet user)
 const mailByUser    = new Map();
