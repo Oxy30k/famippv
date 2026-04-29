@@ -36,6 +36,35 @@ const embedSessions  = new Map();
 const LOG_CHANNEL_ID = "1493101729703657662";
 const LIVE_CHANNEL_ID = "1496971161295388792";
 
+// ─── AUTOMOD CONFIG ────────────────────────────────────────────────────────────
+
+const AUTOMOD = {
+  antiLink:        true,   // supprime liens scam/token/phishing
+  antiSlur:        true,   // supprime insultes raciales
+  antiSpam:        true,   // mute si spam (5 msgs / 5s)
+  antiMassMention: true,   // supprime si 4+ mentions dans un message
+  ghostPingAlert:  true,   // alerte si quelqu'un ping puis supprime
+};
+
+// ─── AUTOMOD DATA ──────────────────────────────────────────────────────────────
+
+// Anti-spam : userId → { count, timer }
+const spamTracker = new Map();
+
+// Snipe : channelId → { author, content, timestamp }
+const snipeData = new Map();
+
+// Ghost ping : stock les messages avec mentions avant suppression
+const mentionCache = new Map(); // messageId → { authorId, mentions[], channelId }
+
+// ─── AUTOMOD REGEX ─────────────────────────────────────────────────────────────
+
+// Liens de phishing / token grabbers / faux nitro
+const SCAM_LINK_REGEX = /(?:https?:\/\/)?(?:www\.)?(?:discord(?:app)?\.(?:gift|com\/(?:nitro|library|oauth2\/authorize\?.*client_id=(?!885738501885009026)))|free[\-_]?nitro|steamc0mmunity|steamcomunity|stearncomrnunity|discordnitro|discord-gift|grabify|iplogger|ipgrab|blasze|linkvertise|bit\.ly\/[a-z0-9]+|tinyurl\.com\/[a-z0-9]+|discord\.gift\/[a-z0-9]+)/gi;
+
+// Slurs raciaux (n-word + bypasses courants)
+const SLUR_REGEX = /n+[i1!|y\u00ef\u00cc\u00cd]+[g6q][g6q]+[ae3\u00e9]+r+s?|n[\W_]*i[\W_]*g[\W_]*g[\W_]*e[\W_]*r|n[\W_]*[\W_]*g[\W_]*g[\W_]*a/gi;
+
 // ─── HELPERS ───────────────────────────────────────────────────────────────────
 
 function isOwner(id) {
@@ -134,6 +163,45 @@ client.on('messageCreate', async message => {
 
 client.on('messageDelete', async message => {
   if (message.author?.bot) return;
+
+  // ── SNIPE : stocke le dernier message supprimé par salon
+  if (message.content) {
+    snipeData.set(message.channel.id, {
+      author:    message.author?.tag || 'Inconnu',
+      authorId:  message.author?.id,
+      content:   message.content,
+      timestamp: Date.now(),
+    });
+  }
+
+  // ── GHOST PING : détecte si le message supprimé contenait des mentions
+  if (AUTOMOD.ghostPingAlert && message.mentions?.users?.size > 0 && !message.author?.bot) {
+    const pinged = [...message.mentions.users.values()].filter(u => !u.bot);
+    if (pinged.length > 0) {
+      const logChannel = getLogChannel();
+      if (logChannel) {
+        const embed = new EmbedBuilder()
+          .setTitle('👻 Ghost Ping détecté !')
+          .setColor(0xFF6B35)
+          .addFields(
+            { name: 'Auteur',     value: `<@${message.author?.id}> (${message.author?.tag})`, inline: true },
+            { name: 'Salon',      value: `<#${message.channel.id}>`, inline: true },
+            { name: 'Pingé(s)',   value: pinged.map(u => `<@${u.id}>`).join(', ') },
+            { name: 'Contenu',    value: message.content?.slice(0, 1024) || '*Non disponible*' }
+          )
+          .setTimestamp();
+        logChannel.send({ embeds: [embed] }).catch(console.error);
+      }
+      // Alerte aussi dans le salon d'origine
+      message.channel.send({
+        embeds: [new EmbedBuilder()
+          .setDescription(`👻 **Ghost ping** détecté ! <@${message.author?.id}> a pingé ${pinged.map(u => `<@${u.id}>`).join(', ')} puis a supprimé son message.`)
+          .setColor(0xFF6B35)
+        ]
+      }).catch(console.error);
+    }
+  }
+
   shared.addLog('deleted', {
     author: message.author?.tag || 'Inconnu', authorId: message.author?.id,
     channel: message.channel?.name, channelId: message.channel?.id,
@@ -230,6 +298,181 @@ client.on('messageReactionAdd', async (reaction, user) => {
   }
 });
 
+// ─── AUTOMOD ───────────────────────────────────────────────────────────────────
+
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
+  if (!message.guild) return;
+  if (isOwner(message.author.id)) return; // les owners sont immunisés
+
+  const content  = message.content;
+  const member   = message.member;
+  const logCh    = getLogChannel();
+
+  // ── 1. ANTI-LIEN SCAM / TOKEN ──────────────────────────────────────────────
+  if (AUTOMOD.antiLink && SCAM_LINK_REGEX.test(content)) {
+    SCAM_LINK_REGEX.lastIndex = 0;
+    await message.delete().catch(() => {});
+
+    // Warn automatique
+    const userWarns = shared.warns.get(message.author.id) || [];
+    userWarns.push({ reason: '[AUTO] Lien scam/phishing détecté', date: new Date().toLocaleString("fr-FR") });
+    shared.warns.set(message.author.id, userWarns);
+
+    // Mute 30 min auto
+    try {
+      await member?.timeout(30 * 60 * 1000, 'AutoMod : lien scam/phishing');
+    } catch {}
+
+    const alertEmbed = new EmbedBuilder()
+      .setTitle('🚫 Lien scam supprimé')
+      .setDescription(`<@${message.author.id}> a envoyé un lien suspect et a été mute **30 min**.`)
+      .setColor(0xE24B4A)
+      .setTimestamp();
+
+    message.channel.send({ embeds: [alertEmbed] })
+      .then(m => setTimeout(() => m.delete().catch(() => {}), 8000))
+      .catch(() => {});
+
+    if (logCh) {
+      logCh.send({ embeds: [new EmbedBuilder()
+        .setTitle('🔗 AutoMod — Lien scam')
+        .setColor(0xE24B4A)
+        .addFields(
+          { name: 'Auteur',  value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+          { name: 'Salon',   value: `<#${message.channel.id}>`, inline: true },
+          { name: 'Contenu', value: content.slice(0, 1024) },
+          { name: 'Action',  value: 'Message supprimé + Mute 30 min + Warn automatique' }
+        ).setTimestamp()
+      ]}).catch(console.error);
+    }
+    return;
+  }
+
+  // ── 2. ANTI-SLUR (N-WORD + BYPASSES) ──────────────────────────────────────
+  if (AUTOMOD.antiSlur && SLUR_REGEX.test(content)) {
+    SLUR_REGEX.lastIndex = 0;
+    await message.delete().catch(() => {});
+
+    const userWarns = shared.warns.get(message.author.id) || [];
+    userWarns.push({ reason: '[AUTO] Slur racial détecté', date: new Date().toLocaleString("fr-FR") });
+    shared.warns.set(message.author.id, userWarns);
+
+    // Mute progressif : 1er = 10 min, 2e = 1h, 3e+ = 24h
+    const warnCount = userWarns.length;
+    const muteDuration = warnCount >= 3 ? 24 * 60 * 60 * 1000 : warnCount === 2 ? 60 * 60 * 1000 : 10 * 60 * 1000;
+    const muteLabel    = warnCount >= 3 ? '24h' : warnCount === 2 ? '1h' : '10 min';
+
+    try {
+      await member?.timeout(muteDuration, 'AutoMod : slur racial');
+    } catch {}
+
+    const alertEmbed = new EmbedBuilder()
+      .setTitle('🚫 Langage interdit')
+      .setDescription(`<@${message.author.id}> a utilisé un terme interdit. Mute **${muteLabel}** (warn n°${warnCount}).`)
+      .setColor(0xE24B4A)
+      .setTimestamp();
+
+    message.channel.send({ embeds: [alertEmbed] })
+      .then(m => setTimeout(() => m.delete().catch(() => {}), 8000))
+      .catch(() => {});
+
+    if (logCh) {
+      logCh.send({ embeds: [new EmbedBuilder()
+        .setTitle('🤬 AutoMod — Slur racial')
+        .setColor(0xE24B4A)
+        .addFields(
+          { name: 'Auteur', value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+          { name: 'Salon',  value: `<#${message.channel.id}>`, inline: true },
+          { name: 'Action', value: `Supprimé + Mute ${muteLabel} (warn n°${warnCount})` }
+        ).setTimestamp()
+      ]}).catch(console.error);
+    }
+    return;
+  }
+
+  // ── 3. ANTI-SPAM ────────────────────────────────────────────────────────────
+  if (AUTOMOD.antiSpam) {
+    const uid  = message.author.id;
+    const now  = Date.now();
+    const data = spamTracker.get(uid) || { count: 0, firstMsg: now };
+
+    if (now - data.firstMsg > 5000) {
+      spamTracker.set(uid, { count: 1, firstMsg: now });
+    } else {
+      data.count++;
+      spamTracker.set(uid, data);
+      if (data.count >= 5) {
+        spamTracker.delete(uid);
+        try {
+          await member?.timeout(10 * 60 * 1000, 'AutoMod : spam');
+          // Supprime les 10 derniers messages du spammer
+          const msgs = await message.channel.messages.fetch({ limit: 15 });
+          const toDelete = msgs.filter(m => m.author.id === uid).first(10);
+          await message.channel.bulkDelete(toDelete, true).catch(() => {});
+        } catch {}
+
+        message.channel.send({
+          embeds: [new EmbedBuilder()
+            .setDescription(`🛑 <@${message.author.id}> a été mute **10 min** pour spam.`)
+            .setColor(0xE24B4A)
+          ]
+        }).then(m => setTimeout(() => m.delete().catch(() => {}), 6000)).catch(() => {});
+
+        if (logCh) {
+          logCh.send({ embeds: [new EmbedBuilder()
+            .setTitle('💬 AutoMod — Spam')
+            .setColor(0xEF9F27)
+            .addFields(
+              { name: 'Auteur', value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+              { name: 'Salon',  value: `<#${message.channel.id}>`, inline: true },
+              { name: 'Action', value: 'Mute 10 min + suppression des derniers messages' }
+            ).setTimestamp()
+          ]}).catch(console.error);
+        }
+        return;
+      }
+    }
+  }
+
+  // ── 4. ANTI-MASS MENTION ────────────────────────────────────────────────────
+  if (AUTOMOD.antiMassMention) {
+    const mentionCount = message.mentions.users.size + message.mentions.roles.size;
+    if (mentionCount >= 4) {
+      await message.delete().catch(() => {});
+
+      const userWarns = shared.warns.get(message.author.id) || [];
+      userWarns.push({ reason: `[AUTO] Mass mention (${mentionCount} mentions)`, date: new Date().toLocaleString("fr-FR") });
+      shared.warns.set(message.author.id, userWarns);
+
+      try {
+        await member?.timeout(5 * 60 * 1000, 'AutoMod : mass mention');
+      } catch {}
+
+      message.channel.send({
+        embeds: [new EmbedBuilder()
+          .setDescription(`📵 <@${message.author.id}> a été mute **5 min** pour mass-mention (${mentionCount} mentions).`)
+          .setColor(0xE24B4A)
+        ]
+      }).then(m => setTimeout(() => m.delete().catch(() => {}), 6000)).catch(() => {});
+
+      if (logCh) {
+        logCh.send({ embeds: [new EmbedBuilder()
+          .setTitle('📢 AutoMod — Mass Mention')
+          .setColor(0xEF9F27)
+          .addFields(
+            { name: 'Auteur',   value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+            { name: 'Salon',    value: `<#${message.channel.id}>`, inline: true },
+            { name: 'Mentions', value: `${mentionCount}`, inline: true },
+            { name: 'Action',   value: 'Message supprimé + Mute 5 min + Warn automatique' }
+          ).setTimestamp()
+        ]}).catch(console.error);
+      }
+      return;
+    }
+  }
+});
+
 // ─── COMMANDES ─────────────────────────────────────────────────────────────────
 
 client.on('messageCreate', async message => {
@@ -237,11 +480,56 @@ client.on('messageCreate', async message => {
   if (!message.guild) return;
   const args = message.content.trim().split(/\s+/);
   if (args[0].toLowerCase() !== PREFIX) return;
-  if (!isOwner(message.author.id)) return message.reply("ftg");
 
   const cmd    = args[1]?.toLowerCase();
   const userId = args[2];
   const reason = args.slice(3).join(" ") || "Aucune raison fournie";
+
+  // ── INFO : commande publique (pas besoin d'être owner) ──────────────────────
+  if (cmd === "info") {
+    const uptime = process.uptime();
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    const s = Math.floor(uptime % 60);
+    const uptimeStr = `${h}h ${m}m ${s}s`;
+
+    const embed = new EmbedBuilder()
+      .setAuthor({ name: `${client.user.username}`, iconURL: client.user.displayAvatarURL() })
+      .setTitle("╔══════ OXY BOT ══════╗")
+      .setDescription(
+        "Un bot Discord **privé**, créé sur mesure pour le serveur de **oxy30k**.\n" +
+        "Il tourne 24/7 et gère tout ce qui se passe ici — modération, sécurité, annonces.\n\n" +
+
+        "**❯ Ce que je fais**\n" +
+        "› 🔨 **Modération complète** — ban, kick, mute, warn, clear, nuke, slowmode, lock\n" +
+        "› 🛡️ **AutoMod** — je supprime automatiquement les liens scam/phishing, les insultes raciales, " +
+        "le spam, les mass-mentions et je détecte les ghost pings\n" +
+        "› 👻 **Ghost Ping** — si quelqu'un ping puis supprime, tout le monde le sait\n" +
+        "› 🔍 **Snipe** — le dernier message supprimé dans un salon peut être retrouvé\n" +
+        "› 🎉 **Giveaways** — avec durée, prix et rôle requis optionnel\n" +
+        "› 📜 **Logs complets** — chaque message supprimé/modifié, changement de rôle, action de modération est tracé\n" +
+        "› 🔴 **Notif TikTok Live** — annonce automatique quand oxy30k part en live\n" +
+        "› 🎨 **Embed Builder** — création d'embeds personnalisés avec interface interactive\n\n" +
+
+        "**❯ Mes owners**\n" +
+        `› <@1146346333721088080>\n` +
+        `› <@950839354438348800>\n\n` +
+
+        "**❯ Infos**\n" +
+        `› 🟢 En ligne depuis : \`${uptimeStr}\`\n` +
+        `› 📡 Ping : \`${client.ws.ping}ms\`\n` +
+        `› 🏠 Serveurs : \`${client.guilds.cache.size}\``
+      )
+      .setColor(0x5865F2)
+      .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
+      .setFooter({ text: "oxy bot • Privé & custom made" })
+      .setTimestamp();
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ── Toutes les autres commandes : owners uniquement ─────────────────────────
+  if (!isOwner(message.author.id)) return message.reply("ftg");
 
   switch (cmd) {
 
@@ -351,6 +639,14 @@ client.on('messageCreate', async message => {
       break;
     }
 
+    // ── CLEARWARN ────────────────────────────────────────────────────────────
+    case "clearwarn": {
+      if (!userId) return missingArg(message, "Donne un ID utilisateur.");
+      shared.warns.delete(userId);
+      message.reply(`🧹 Warns de <@${userId}> réinitialisés.`);
+      break;
+    }
+
     // ── CLEAR ────────────────────────────────────────────────────────────────
     case "clear": {
       const amount = parseInt(args[2]);
@@ -364,6 +660,28 @@ client.on('messageCreate', async message => {
       } catch (err) {
         console.error('[CLEAR]', err);
         message.reply(`❌ Erreur clear : \`${err.message}\``);
+      }
+      break;
+    }
+
+    // ── PURGE USER ────────────────────────────────────────────────────────────
+    // Supprime X messages d'un utilisateur précis dans le salon
+    case "purge": {
+      const targetId = args[2];
+      const amount   = parseInt(args[3]) || 20;
+      if (!targetId) return missingArg(message, "Usage : `oxy purge <id> [nombre]`");
+      if (amount < 1 || amount > 100) return missingArg(message, "Nombre entre 1 et 100.");
+      try {
+        const msgs    = await message.channel.messages.fetch({ limit: 100 });
+        const toDelete = msgs.filter(m => m.author.id === targetId).first(amount);
+        if (toDelete.length === 0) return message.reply("❌ Aucun message trouvé pour cet utilisateur.");
+        await message.channel.bulkDelete(toDelete, true);
+        const confirm = await message.channel.send(`🧹 ${toDelete.length} messages de <@${targetId}> supprimés.`);
+        setTimeout(() => confirm.delete().catch(() => {}), 4000);
+        message.delete().catch(() => {});
+      } catch (err) {
+        console.error('[PURGE]', err);
+        message.reply(`❌ Erreur purge : \`${err.message}\``);
       }
       break;
     }
@@ -393,6 +711,61 @@ client.on('messageCreate', async message => {
         console.error('[UNLOCK]', err);
         message.reply(`❌ Impossible d'unlock : \`${err.message}\``);
       }
+      break;
+    }
+
+    // ── SLOWMODE ─────────────────────────────────────────────────────────────
+    // Active/désactive un slowmode sur le salon
+    case "slowmode": {
+      const seconds = parseInt(args[2]);
+      if (isNaN(seconds) || seconds < 0 || seconds > 21600)
+        return missingArg(message, "Usage : `oxy slowmode <secondes>` (0 pour désactiver, max 21600)");
+      try {
+        await message.channel.setRateLimitPerUser(seconds);
+        message.reply(seconds === 0
+          ? "⏱️ Slowmode désactivé."
+          : `⏱️ Slowmode activé : **${seconds}s** entre chaque message.`
+        );
+      } catch (err) {
+        message.reply(`❌ Erreur slowmode : \`${err.message}\``);
+      }
+      break;
+    }
+
+    // ── SNIPE ─────────────────────────────────────────────────────────────────
+    // Affiche le dernier message supprimé dans le salon
+    case "snipe": {
+      const snipe = snipeData.get(message.channel.id);
+      if (!snipe) return message.reply("❌ Rien à sniper dans ce salon.");
+      const age = Math.floor((Date.now() - snipe.timestamp) / 1000);
+      const embed = new EmbedBuilder()
+        .setTitle("🔍 Dernier message supprimé")
+        .setDescription(snipe.content)
+        .setColor(0x5865F2)
+        .setFooter({ text: `Auteur : ${snipe.author} • Il y a ${age}s` })
+        .setTimestamp(snipe.timestamp);
+      message.reply({ embeds: [embed] });
+      break;
+    }
+
+    // ── AUTOMOD TOGGLE ────────────────────────────────────────────────────────
+    // Active/désactive un module automod à chaud
+    case "automod": {
+      const module = args[2]?.toLowerCase();
+      const state  = args[3]?.toLowerCase();
+      const modules = {
+        antilink:        'antiLink',
+        antislur:        'antiSlur',
+        antispam:        'antiSpam',
+        antimention:     'antiMassMention',
+        ghostping:       'ghostPingAlert',
+      };
+      if (!module || !modules[module])
+        return message.reply(`❌ Modules : \`antilink\` \`antislur\` \`antispam\` \`antimention\` \`ghostping\``);
+      if (state === 'on')  AUTOMOD[modules[module]] = true;
+      if (state === 'off') AUTOMOD[modules[module]] = false;
+      const current = AUTOMOD[modules[module]];
+      message.reply(`${current ? '✅' : '❌'} AutoMod **${module}** est maintenant **${current ? 'activé' : 'désactivé'}**.`);
       break;
     }
 
@@ -523,6 +896,7 @@ client.on('messageCreate', async message => {
               .sort((a, b) => b.position - a.position)
               .map(r => `<@&${r.id}>`).join(", ") || "Aucun"
           : "Non membre du serveur";
+        const userWarnCount = (shared.warns.get(userId) || []).length;
         const embed = new EmbedBuilder()
           .setTitle(`👤 ${user.tag}`)
           .setThumbnail(user.displayAvatarURL({ size: 256 }))
@@ -530,6 +904,7 @@ client.on('messageCreate', async message => {
           .addFields(
             { name: "ID",             value: user.id,                                              inline: true },
             { name: "Bot ?",          value: user.bot ? "Oui" : "Non",                            inline: true },
+            { name: "Warns",          value: `${userWarnCount}`,                                   inline: true },
             { name: "Compte créé le", value: `<t:${Math.floor(user.createdTimestamp / 1000)}:D>`, inline: true },
           );
         if (member) embed.addFields(
@@ -676,9 +1051,12 @@ client.on('messageCreate', async message => {
             "`oxy unmute <id>` — Unmute",
             "`oxy warn <id> [raison]` — Avertir",
             "`oxy warns <id>` — Voir les warns",
+            "`oxy clearwarn <id>` — Reset les warns 🆕",
             "`oxy clear <1-100>` — Supprimer des messages",
+            "`oxy purge <id> [1-100]` — Supprimer msgs d'un user 🆕",
             "`oxy lock` — Verrouiller le salon",
             "`oxy unlock` — Déverrouiller le salon",
+            "`oxy slowmode <secondes>` — Slowmode 🆕",
             "`oxy nuke` — 💣 Nuke le salon",
           ].join("\n")},
           { name: "Rôles & Membres", value: [
@@ -686,8 +1064,19 @@ client.on('messageCreate', async message => {
             "`oxy dmall <message>` — DM tous les membres",
           ].join("\n")},
           { name: "Infos", value: [
-            "`oxy userinfo <id>` — Infos d'un utilisateur",
+            "`oxy userinfo <id>` — Infos + warns d'un utilisateur 🆕",
             "`oxy serverinfo` — Infos du serveur",
+            "`oxy snipe` — Voir le dernier msg supprimé 🆕",
+          ].join("\n")},
+          { name: "AutoMod (automatique)", value: [
+            "🔗 **Anti-lien scam** — Supprime + mute 30min 🆕",
+            "🤬 **Anti-slur** — Mute progressif (10min/1h/24h) 🆕",
+            "💬 **Anti-spam** — Mute 10min si 5 msgs en 5s 🆕",
+            "📢 **Anti-mass mention** — Supprime si 4+ mentions 🆕",
+            "👻 **Ghost ping alert** — Alerte si ping puis delete 🆕",
+            "",
+            "`oxy automod <module> <on|off>` — Toggle un module",
+            "*Modules : `antilink` `antislur` `antispam` `antimention` `ghostping`*",
           ].join("\n")},
           { name: "Giveaway", value: [
             "`oxy gw <durée> <prix>` — Giveaway ouvert à tous",
@@ -695,11 +1084,12 @@ client.on('messageCreate', async message => {
             "*Durées : `30s` `10m` `2h` `1d`*",
           ].join("\n")},
           { name: "Utilitaire", value: [
-            "`oxy live` — Envoyer la notif live TikTok 🆕",
+            "`oxy live` — Envoyer la notif live TikTok",
             "`oxy spam ping <1-50> <id>` — Spam ping",
             "`oxy dm <id> <message>` — Envoyer un DM",
-            "`oxy embed` — Créer un embed interactif 🆕",
+            "`oxy embed` — Créer un embed interactif",
             "`oxy owner` — Affiche les owners",
+            "`oxy info` — Infos publiques sur le bot 🆕",
             "`oxy help` — Cette aide",
           ].join("\n")},
         )
