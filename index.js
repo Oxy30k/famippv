@@ -248,8 +248,22 @@ client.on('ready', async () => {
 
 // ─── INVITE EVENTS ─────────────────────────────────────────────────────────────
 
+const INVITE_LOG_CH = "1499618798796279838";
+
 client.on('inviteCreate', invite => {
   inviteCache.set(invite.code, invite.uses ?? 0);
+
+  // Notif dans le salon dédié
+  const logCh = client.channels.cache.get(INVITE_LOG_CH);
+  if (logCh && invite.inviter) {
+    logCh.send({
+      embeds: [new EmbedBuilder()
+        .setDescription(`📨 <@${invite.inviter.id}> **(${invite.inviter.tag})** a créé une invitation — \`${invite.code}\``)
+        .setColor(0x5865F2)
+        .setTimestamp()
+      ]
+    }).catch(console.error);
+  }
 });
 
 client.on('inviteDelete', invite => {
