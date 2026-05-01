@@ -233,6 +233,9 @@ function buildControlButtons(session) {
 client.on('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
 
+  // Init Turso DB
+  await db.initDB();
+
   // Cache des invites au démarrage
   for (const guild of client.guilds.cache.values()) {
     try {
@@ -488,7 +491,7 @@ client.on('guildMemberAdd', async member => {
     const newInvites = await member.guild.invites.fetch();
     const usedInvite = newInvites.find(inv => (inviteCache.get(inv.code) ?? 0) < inv.uses);
     if (usedInvite && usedInvite.inviter) {
-      db.addInvite(usedInvite.inviter.id, member.id);
+      await db.addInvite(usedInvite.inviter.id, member.id);
     }
     newInvites.forEach(inv => inviteCache.set(inv.code, inv.uses));
   } catch (err) { console.error('[INVITE TRACK]', err); }
@@ -512,7 +515,7 @@ client.on('guildMemberAdd', async member => {
 
 client.on('guildMemberRemove', async member => {
   // Décrémenter les invites si le membre quitte
-  db.removeInvitedMember(member.id);
+  await db.removeInvitedMember(member.id);
 
   const logChannel = getLogChannel();
   if (!logChannel) return;
@@ -619,7 +622,7 @@ client.on('messageCreate', async message => {
   if (AUTOMOD.antiLink && SCAM_LINK_REGEX.test(content)) {
     SCAM_LINK_REGEX.lastIndex = 0;
     await message.delete().catch(() => {});
-    db.addWarn(message.author.id, '[AUTO] Lien scam/phishing détecté', 'AutoMod');
+    await db.addWarn(message.author.id, '[AUTO] Lien scam/phishing détecté', 'AutoMod');
     try { await member?.timeout(30 * 60 * 1000, 'AutoMod : lien scam/phishing'); } catch {}
     message.channel.send({ embeds: [new EmbedBuilder()
       .setTitle('🚫 Lien scam supprimé')
@@ -642,8 +645,8 @@ client.on('messageCreate', async message => {
   if (AUTOMOD.antiSlur && SLUR_REGEX.test(content)) {
     SLUR_REGEX.lastIndex = 0;
     await message.delete().catch(() => {});
-    db.addWarn(message.author.id, '[AUTO] Slur racial détecté', 'AutoMod');
-    const warnCount    = db.getWarnCount(message.author.id);
+    await db.addWarn(message.author.id, '[AUTO] Slur racial détecté', 'AutoMod');
+    const warnCount    = await db.getWarnCount(message.author.id);
     const muteDuration = warnCount >= 3 ? 24 * 60 * 60 * 1000 : warnCount === 2 ? 60 * 60 * 1000 : 10 * 60 * 1000;
     const muteLabel    = warnCount >= 3 ? '24h' : warnCount === 2 ? '1h' : '10 min';
     try { await member?.timeout(muteDuration, 'AutoMod : slur racial'); } catch {}
@@ -703,7 +706,7 @@ client.on('messageCreate', async message => {
     const mentionCount = message.mentions.users.size + message.mentions.roles.size;
     if (mentionCount >= 4) {
       await message.delete().catch(() => {});
-      db.addWarn(message.author.id, `[AUTO] Mass mention (${mentionCount} mentions)`, 'AutoMod');
+      await db.addWarn(message.author.id, `[AUTO] Mass mention (${mentionCount} mentions)`, 'AutoMod');
       try { await member?.timeout(5 * 60 * 1000, 'AutoMod : mass mention'); } catch {}
       message.channel.send({ embeds: [new EmbedBuilder()
         .setDescription(`📵 <@${message.author.id}> a été mute **5 min** pour mass-mention (${mentionCount} mentions).`)
@@ -737,13 +740,13 @@ client.on('messageCreate', async message => {
   xpCooldown.set(userId, now);
 
   const xpGain   = Math.floor(Math.random() * 11) + 15; // 15-25 XP aléatoire
-  const userData = db.addXP(userId, xpGain);
+  const userData = await db.addXP(userId, xpGain);
 
   // Vérification level up
   const nextLevelXP = xpForLevel(userData.level + 1);
   if (userData.xp >= nextLevelXP) {
     const newLevel = userData.level + 1;
-    db.setLevel(userId, newLevel);
+    await db.setLevel(userId, newLevel);
 
     message.channel.send({
       embeds: [new EmbedBuilder()
@@ -782,30 +785,31 @@ client.on('messageCreate', async message => {
     const m = Math.floor((uptime % 3600) / 60);
     const s = Math.floor(uptime % 60);
     return message.reply({ embeds: [new EmbedBuilder()
-      .setAuthor({ name: client.user.username, iconURL: client.user.displayAvatarURL() })
-      .setTitle("╔══════ OXY BOT ══════╗")
+      .setAuthor({ name: "oxy bot", iconURL: client.user.displayAvatarURL() })
+      .setTitle("Bot privé & custom — fait pour oxy30k")
       .setDescription(
-        "Un bot Discord **privé**, créé sur mesure pour le serveur de **oxy30k**.\n\n" +
-        "**❯ Ce que je fais**\n" +
-        "› 🔨 **Modération** — ban, kick, mute, warn, clear, nuke, slowmode, lock\n" +
-        "› 🛡️ **AutoMod** — liens scam, slurs, spam, mass-mentions, ghost pings\n" +
-        "› 🚨 **Anti-Raid** — détection + lock auto + anti-alt (comptes < 7 jours)\n" +
-        "› 🎫 **Tickets** — support privé avec transcript auto\n" +
-        "› 🏆 **Système XP** — levels, rang, classement\n" +
-        "› 📜 **Logs complets** — audit log, joins/leaves, bans, rôles\n" +
-        "› 🎉 **Giveaways** — avec durée, prix et rôle requis optionnel\n" +
-        "› 🔴 **Notif TikTok Live** — annonce automatique\n" +
-        "› 🎨 **Embed Builder** — interface interactive\n\n" +
-        "**❯ Mes owners**\n" +
-        `› <@1146346333721088080>\n› <@950839354438348800>\n\n` +
-        "**❯ Infos**\n" +
-        `› 🟢 Uptime : \`${h}h ${m}m ${s}s\`\n` +
-        `› 📡 Ping : \`${client.ws.ping}ms\`\n` +
-        `› 🏠 Serveurs : \`${client.guilds.cache.size}\``
+        "Je suis le bot officiel du serveur de **oxy30k**, entièrement développé sur mesure.\n" +
+        "Mon seul serveur, mes seuls owners. Je ne suis pas public.\n\n" +
+        "**Ce que je fais au quotidien :**\n" +
+        "🔨 **Modération** — ban, kick, mute, warn, clear, nuke, lock, slowmode\n" +
+        "🛡️ **AutoMod** — anti-scam, anti-slur, anti-spam, anti-mass mention, ghost ping\n" +
+        "🚨 **Anti-Raid & Anti-Alt** — lock auto du serveur + kick des comptes récents\n" +
+        "🎫 **Tickets** — support privé avec transcript sauvegardé automatiquement\n" +
+        "🏆 **Système XP** — niveaux, classement, rôles récompenses\n" +
+        "📨 **Suivi des invitations** — compte les invites valides en temps réel\n" +
+        "📜 **Logs complets** — messages, rôles, joins, bans, audit log\n" +
+        "🎉 **Giveaways** — avec durée, prix et rôle requis optionnel\n" +
+        "🔴 **Notif TikTok Live** — annonce automatique dans le serveur\n" +
+        "🎨 **Embed Builder** — création d'embeds via interface interactive"
+      )
+      .addFields(
+        { name: "⏱️ Uptime",    value: `\`${h}h ${m}m ${s}s\``, inline: true },
+        { name: "📡 Ping",      value: `\`${client.ws.ping}ms\``, inline: true },
+        { name: "👑 Owners",    value: `<@1146346333721088080> & <@950839354438348800>`, inline: true },
       )
       .setColor(0x5865F2)
       .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
-      .setFooter({ text: "oxy bot • Privé & custom made" })
+      .setFooter({ text: "oxy bot • custom made • privé" })
       .setTimestamp()
     ]});
   }
@@ -815,8 +819,8 @@ client.on('messageCreate', async message => {
     const targetId = args[2]?.replace(/[<@!>]/g, '') || message.author.id;
     try {
       const user       = await client.users.fetch(targetId);
-      const xpData     = db.getXP(targetId);
-      const rank       = db.getRank(targetId);
+      const xpData     = await db.getXP(targetId);
+      const rank       = await db.getRank(targetId);
       const nextLvlXP  = xpForLevel(xpData.level + 1);
       const progress   = Math.min(Math.floor((xpData.xp / nextLvlXP) * 20), 20);
       const bar        = '█'.repeat(progress) + '░'.repeat(20 - progress);
@@ -836,7 +840,7 @@ client.on('messageCreate', async message => {
 
   // ── Top : commande publique ───────────────────────────────────────────────
   if (cmd === "top") {
-    const top = db.getLeaderboard(10);
+    const top = await db.getLeaderboard(10);
     if (!top.length) return message.reply("❌ Aucune donnée XP pour l'instant.");
     const lines = await Promise.all(top.map(async (row, i) => {
       let tag = row.userId;
@@ -857,8 +861,8 @@ client.on('messageCreate', async message => {
     const targetId = args[2]?.replace(/[<@!>]/g, '') || message.author.id;
     try {
       const user      = await client.users.fetch(targetId);
-      const invData   = db.getInvites(targetId);
-      const rankInv   = db.getInviteRank(targetId);
+      const invData   = await db.getInvites(targetId);
+      const rankInv   = await db.getInviteRank(targetId);
       return message.reply({ embeds: [new EmbedBuilder()
         .setTitle(`📨 Invitations de ${user.tag}`)
         .setThumbnail(user.displayAvatarURL({ size: 128 }))
@@ -876,7 +880,7 @@ client.on('messageCreate', async message => {
 
   // ── Invite panel : commande publique ──────────────────────────────────────
   if (cmd === "invite" && args[2] === "panel") {
-    const top = db.getInviteLeaderboard(10);
+    const top = await db.getInviteLeaderboard(10);
     if (!top.length) return message.reply("❌ Aucune donnée d'invitation pour l'instant.");
     const lines = await Promise.all(top.map(async (row, i) => {
       let tag = row.inviterId;
@@ -971,8 +975,8 @@ client.on('messageCreate', async message => {
     // ── WARN ─────────────────────────────────────────────────────────────────
     case "warn": {
       if (!userId) return missingArg(message, "Donne un ID utilisateur.");
-      db.addWarn(userId, reason, message.author.tag);
-      const total = db.getWarnCount(userId);
+      await await db.addWarn(userId, reason, message.author.tag);
+      const total = await db.getWarnCount(userId);
       message.reply(`⚠️ <@${userId}> warn (total : **${total}**). | Raison : ${reason}`);
       break;
     }
@@ -980,7 +984,7 @@ client.on('messageCreate', async message => {
     // ── WARNS LIST ───────────────────────────────────────────────────────────
     case "warns": {
       if (!userId) return missingArg(message, "Donne un ID utilisateur.");
-      const userWarns = db.getWarns(userId);
+      const userWarns = await db.getWarns(userId);
       if (!userWarns.length) return message.reply(`✅ <@${userId}> n'a aucun warn.`);
       const list = userWarns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.date}* — par ${w.by}`).join("\n");
       message.reply(`📋 Warns de <@${userId}> (${userWarns.length}) :\n${list}`);
@@ -990,7 +994,7 @@ client.on('messageCreate', async message => {
     // ── CLEARWARN ────────────────────────────────────────────────────────────
     case "clearwarn": {
       if (!userId) return missingArg(message, "Donne un ID utilisateur.");
-      db.clearWarns(userId);
+      await db.clearWarns(userId);
       message.reply(`🧹 Warns de <@${userId}> réinitialisés.`);
       break;
     }
@@ -1221,8 +1225,8 @@ client.on('messageCreate', async message => {
               .sort((a, b) => b.position - a.position)
               .map(r => `<@&${r.id}>`).join(", ") || "Aucun"
           : "Non membre du serveur";
-        const warnCount = db.getWarnCount(userId);
-        const xpData    = db.getXP(userId);
+        const warnCount = await db.getWarnCount(userId);
+        const xpData    = await db.getXP(userId);
         const embed = new EmbedBuilder()
           .setTitle(`👤 ${user.tag}`)
           .setThumbnail(user.displayAvatarURL({ size: 256 }))
@@ -1523,8 +1527,8 @@ client.on('interactionCreate', async interaction => {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
     const user   = interaction.options.getUser('user');
     const reason = interaction.options.getString('raison') || 'Aucune raison';
-    db.addWarn(user.id, reason, interaction.user.tag);
-    const total = db.getWarnCount(user.id);
+    await db.addWarn(user.id, reason, interaction.user.tag);
+    const total = await db.getWarnCount(user.id);
     interaction.reply(`⚠️ <@${user.id}> warn (total : **${total}**). | ${reason}`);
   }
 
@@ -1532,7 +1536,7 @@ client.on('interactionCreate', async interaction => {
   else if (commandName === 'warns') {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
     const user  = interaction.options.getUser('user');
-    const warns = db.getWarns(user.id);
+    const warns = await db.getWarns(user.id);
     if (!warns.length) return interaction.reply({ content: `✅ <@${user.id}> n'a aucun warn.`, ephemeral: true });
     const list = warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.date}* — par ${w.by}`).join("\n");
     interaction.reply({ content: `📋 Warns de <@${user.id}> (${warns.length}) :\n${list}`, ephemeral: true });
@@ -1542,7 +1546,7 @@ client.on('interactionCreate', async interaction => {
   else if (commandName === 'clearwarn') {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
     const user = interaction.options.getUser('user');
-    db.clearWarns(user.id);
+    await db.clearWarns(user.id);
     interaction.reply(`🧹 Warns de <@${user.id}> réinitialisés.`);
   }
 
@@ -1559,8 +1563,8 @@ client.on('interactionCreate', async interaction => {
   // /rank
   else if (commandName === 'rank') {
     const user      = interaction.options.getUser('user') || interaction.user;
-    const xpData    = db.getXP(user.id);
-    const rank      = db.getRank(user.id);
+    const xpData    = await db.getXP(user.id);
+    const rank      = await db.getRank(user.id);
     const nextLvlXP = xpForLevel(xpData.level + 1);
     const progress  = Math.min(Math.floor((xpData.xp / nextLvlXP) * 20), 20);
     const bar       = '█'.repeat(progress) + '░'.repeat(20 - progress);
@@ -1579,7 +1583,7 @@ client.on('interactionCreate', async interaction => {
 
   // /top
   else if (commandName === 'top') {
-    const top = db.getLeaderboard(10);
+    const top = await db.getLeaderboard(10);
     if (!top.length) return interaction.reply({ content: "❌ Aucune donnée XP.", ephemeral: true });
     const lines = await Promise.all(top.map(async (row, i) => {
       let tag = row.userId;
@@ -1600,8 +1604,8 @@ client.on('interactionCreate', async interaction => {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
     const user      = interaction.options.getUser('user');
     const member    = await getMember(interaction.guild, user.id);
-    const xpData    = db.getXP(user.id);
-    const warnCount = db.getWarnCount(user.id);
+    const xpData    = await db.getXP(user.id);
+    const warnCount = await db.getWarnCount(user.id);
     const embed     = new EmbedBuilder()
       .setTitle(`👤 ${user.tag}`)
       .setThumbnail(user.displayAvatarURL({ size: 256 }))
@@ -1703,8 +1707,8 @@ client.on('interactionCreate', async interaction => {
 
     if (sub === 'stats') {
       const user    = interaction.options.getUser('user') || interaction.user;
-      const invData = db.getInvites(user.id);
-      const rankInv = db.getInviteRank(user.id);
+      const invData = await db.getInvites(user.id);
+      const rankInv = await db.getInviteRank(user.id);
       return interaction.reply({ embeds: [new EmbedBuilder()
         .setTitle(`📨 Invitations de ${user.tag}`)
         .setThumbnail(user.displayAvatarURL({ size: 128 }))
@@ -1720,7 +1724,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (sub === 'panel') {
-      const top = db.getInviteLeaderboard(10);
+      const top = await db.getInviteLeaderboard(10);
       if (!top.length) return interaction.reply({ content: "❌ Aucune donnée d'invitation pour l'instant.", ephemeral: true });
       const lines = await Promise.all(top.map(async (row, i) => {
         let tag = row.inviterId;
@@ -1746,7 +1750,7 @@ async function handleComponents(interaction) {
 
   // ── TICKET CREATE ──────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === "ticket_create") {
-    const existing = db.getUserOpenTicket(interaction.user.id);
+    const existing = await db.getUserOpenTicket(interaction.user.id);
     if (existing) {
       return interaction.reply({ content: `❌ Tu as déjà un ticket ouvert : <#${existing.channelId}>`, ephemeral: true });
     }
@@ -1782,7 +1786,7 @@ async function handleComponents(interaction) {
         ],
       });
 
-      db.createTicket(ticketChannel.id, interaction.user.id);
+      await db.createTicket(ticketChannel.id, interaction.user.id);
 
       await ticketChannel.send({
         content: `<@${interaction.user.id}>`,
@@ -1812,7 +1816,7 @@ async function handleComponents(interaction) {
 
   // ── TICKET CLOSE ──────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === "ticket_close") {
-    const ticketData = db.getTicket(interaction.channel.id);
+    const ticketData = await db.getTicket(interaction.channel.id);
     if (!ticketData) return interaction.reply({ content: "❌ Ce salon n'est pas un ticket.", ephemeral: true });
 
     await interaction.reply({ content: "🔒 Fermeture du ticket en cours..." });
@@ -1845,7 +1849,7 @@ async function handleComponents(interaction) {
         });
       }
 
-      db.closeTicketDB(interaction.channel.id);
+      await db.closeTicketDB(interaction.channel.id);
       await new Promise(r => setTimeout(r, 3000));
       await interaction.channel.delete();
     } catch (err) {
