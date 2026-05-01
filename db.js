@@ -24,6 +24,12 @@ db.exec(`
     status    TEXT DEFAULT 'open',
     createdAt TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS invites (
+    inviterId  TEXT NOT NULL,
+    invitedId  TEXT NOT NULL PRIMARY KEY,
+    left       INTEGER DEFAULT 0
+  );
 `);
 
 // ─── WARNS ─────────────────────────────────────────────────────────────────────
@@ -92,10 +98,50 @@ function closeTicketDB(channelId) {
   db.prepare("UPDATE tickets SET status = 'closed' WHERE channelId = ?").run(channelId);
 }
 
+// ─── INVITES ───────────────────────────────────────────────────────────────────
+
+function addInvite(inviterId, invitedId) {
+  db.prepare('INSERT OR IGNORE INTO invites (inviterId, invitedId, left) VALUES (?, ?, 0)').run(inviterId, invitedId);
+}
+
+function removeInvitedMember(invitedId) {
+  // Marque la personne comme partie (invite ne compte plus)
+  db.prepare('UPDATE invites SET left = 1 WHERE invitedId = ?').run(invitedId);
+}
+
+function getInvites(inviterId) {
+  const total = db.prepare('SELECT COUNT(*) as count FROM invites WHERE inviterId = ?').get(inviterId).count;
+  const left  = db.prepare('SELECT COUNT(*) as count FROM invites WHERE inviterId = ? AND left = 1').get(inviterId).count;
+  return { total, left, valid: total - left };
+}
+
+function getInviteLeaderboard(limit = 10) {
+  return db.prepare(`
+    SELECT inviterId,
+      COUNT(*) as total,
+      SUM(left) as left,
+      COUNT(*) - SUM(left) as valid
+    FROM invites
+    GROUP BY inviterId
+    ORDER BY valid DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+function getInviteRank(inviterId) {
+  const rows = db.prepare(`
+    SELECT inviterId, COUNT(*) - SUM(left) as valid
+    FROM invites GROUP BY inviterId ORDER BY valid DESC
+  `).all();
+  const idx = rows.findIndex(r => r.inviterId === inviterId);
+  return idx === -1 ? null : idx + 1;
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 
 module.exports = {
   getWarns, addWarn, clearWarns, getWarnCount,
   getXP, addXP, setLevel, getLeaderboard, getRank,
   createTicket, getTicket, getUserOpenTicket, closeTicketDB,
+  addInvite, removeInvitedMember, getInvites, getInviteLeaderboard, getInviteRank,
 };
