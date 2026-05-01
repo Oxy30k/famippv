@@ -1,145 +1,162 @@
-const Database = require('better-sqlite3');
-const db = new Database('./oxy.db');
+const { createClient } = require('@libsql/client');
 
-// ─── TABLES ────────────────────────────────────────────────────────────────────
+const db = createClient({
+  url:       process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS warns (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId  TEXT    NOT NULL,
-    reason  TEXT    DEFAULT 'Aucune raison',
-    date    TEXT,
-    by      TEXT    DEFAULT 'Système'
-  );
+// ─── INIT TABLES ───────────────────────────────────────────────────────────────
 
-  CREATE TABLE IF NOT EXISTS xp (
-    userId TEXT    PRIMARY KEY,
-    xp     INTEGER DEFAULT 0,
-    level  INTEGER DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS tickets (
-    channelId TEXT PRIMARY KEY,
-    userId    TEXT NOT NULL,
-    status    TEXT DEFAULT 'open',
-    createdAt TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS invites (
-    inviterId  TEXT NOT NULL,
-    invitedId  TEXT NOT NULL PRIMARY KEY,
-    left       INTEGER DEFAULT 0
-  );
-`);
+async function initDB() {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS warns (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId    TEXT    NOT NULL,
+      reason    TEXT    DEFAULT 'Aucune raison',
+      date      TEXT,
+      by        TEXT    DEFAULT 'Système'
+    );
+    CREATE TABLE IF NOT EXISTS xp (
+      userId TEXT    PRIMARY KEY,
+      xp     INTEGER DEFAULT 0,
+      level  INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS tickets (
+      channelId TEXT PRIMARY KEY,
+      userId    TEXT NOT NULL,
+      status    TEXT DEFAULT 'open',
+      createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS invites (
+      inviterId TEXT NOT NULL,
+      invitedId TEXT NOT NULL PRIMARY KEY,
+      left      INTEGER DEFAULT 0
+    );
+  `);
+  console.log('✅ Turso DB initialisée');
+}
 
 // ─── WARNS ─────────────────────────────────────────────────────────────────────
 
-function getWarns(userId) {
-  return db.prepare('SELECT * FROM warns WHERE userId = ?').all(userId);
+async function getWarns(userId) {
+  const res = await db.execute({ sql: 'SELECT * FROM warns WHERE userId = ?', args: [userId] });
+  return res.rows;
 }
 
-function addWarn(userId, reason = 'Aucune raison', by = 'Système') {
+async function addWarn(userId, reason = 'Aucune raison', by = 'Système') {
   const date = new Date().toLocaleString('fr-FR');
-  return db.prepare('INSERT INTO warns (userId, reason, date, by) VALUES (?, ?, ?, ?)').run(userId, reason, date, by);
+  await db.execute({ sql: 'INSERT INTO warns (userId, reason, date, by) VALUES (?, ?, ?, ?)', args: [userId, reason, date, by] });
 }
 
-function clearWarns(userId) {
-  return db.prepare('DELETE FROM warns WHERE userId = ?').run(userId);
+async function clearWarns(userId) {
+  await db.execute({ sql: 'DELETE FROM warns WHERE userId = ?', args: [userId] });
 }
 
-function getWarnCount(userId) {
-  return db.prepare('SELECT COUNT(*) as count FROM warns WHERE userId = ?').get(userId).count;
+async function getWarnCount(userId) {
+  const res = await db.execute({ sql: 'SELECT COUNT(*) as count FROM warns WHERE userId = ?', args: [userId] });
+  return Number(res.rows[0].count);
 }
 
 // ─── XP ────────────────────────────────────────────────────────────────────────
 
-function getXP(userId) {
-  return db.prepare('SELECT * FROM xp WHERE userId = ?').get(userId) || { userId, xp: 0, level: 0 };
+async function getXP(userId) {
+  const res = await db.execute({ sql: 'SELECT * FROM xp WHERE userId = ?', args: [userId] });
+  return res.rows[0] || { userId, xp: 0, level: 0 };
 }
 
-function addXP(userId, amount) {
-  db.prepare(`
-    INSERT INTO xp (userId, xp, level) VALUES (?, ?, 0)
-    ON CONFLICT(userId) DO UPDATE SET xp = xp + ?
-  `).run(userId, amount, amount);
-  return db.prepare('SELECT * FROM xp WHERE userId = ?').get(userId);
+async function addXP(userId, amount) {
+  await db.execute({
+    sql: `INSERT INTO xp (userId, xp, level) VALUES (?, ?, 0)
+          ON CONFLICT(userId) DO UPDATE SET xp = xp + ?`,
+    args: [userId, amount, amount],
+  });
+  const res = await db.execute({ sql: 'SELECT * FROM xp WHERE userId = ?', args: [userId] });
+  return res.rows[0];
 }
 
-function setLevel(userId, level) {
-  db.prepare('UPDATE xp SET level = ? WHERE userId = ?').run(level, userId);
+async function setLevel(userId, level) {
+  await db.execute({ sql: 'UPDATE xp SET level = ? WHERE userId = ?', args: [level, userId] });
 }
 
-function getLeaderboard(limit = 10) {
-  return db.prepare('SELECT * FROM xp ORDER BY xp DESC LIMIT ?').all(limit);
+async function getLeaderboard(limit = 10) {
+  const res = await db.execute({ sql: 'SELECT * FROM xp ORDER BY xp DESC LIMIT ?', args: [limit] });
+  return res.rows;
 }
 
-function getRank(userId) {
-  const rows = db.prepare('SELECT userId FROM xp ORDER BY xp DESC').all();
-  const idx  = rows.findIndex(r => r.userId === userId);
+async function getRank(userId) {
+  const res = await db.execute({ sql: 'SELECT userId FROM xp ORDER BY xp DESC', args: [] });
+  const idx = res.rows.findIndex(r => r.userId === userId);
   return idx === -1 ? null : idx + 1;
 }
 
 // ─── TICKETS ───────────────────────────────────────────────────────────────────
 
-function createTicket(channelId, userId) {
+async function createTicket(channelId, userId) {
   const createdAt = new Date().toLocaleString('fr-FR');
-  db.prepare('INSERT INTO tickets (channelId, userId, status, createdAt) VALUES (?, ?, ?, ?)').run(channelId, userId, 'open', createdAt);
+  await db.execute({ sql: 'INSERT INTO tickets (channelId, userId, status, createdAt) VALUES (?, ?, ?, ?)', args: [channelId, userId, 'open', createdAt] });
 }
 
-function getTicket(channelId) {
-  return db.prepare('SELECT * FROM tickets WHERE channelId = ?').get(channelId);
+async function getTicket(channelId) {
+  const res = await db.execute({ sql: 'SELECT * FROM tickets WHERE channelId = ?', args: [channelId] });
+  return res.rows[0] || null;
 }
 
-function getUserOpenTicket(userId) {
-  return db.prepare("SELECT * FROM tickets WHERE userId = ? AND status = 'open'").get(userId);
+async function getUserOpenTicket(userId) {
+  const res = await db.execute({ sql: "SELECT * FROM tickets WHERE userId = ? AND status = 'open'", args: [userId] });
+  return res.rows[0] || null;
 }
 
-function closeTicketDB(channelId) {
-  db.prepare("UPDATE tickets SET status = 'closed' WHERE channelId = ?").run(channelId);
+async function closeTicketDB(channelId) {
+  await db.execute({ sql: "UPDATE tickets SET status = 'closed' WHERE channelId = ?", args: [channelId] });
 }
 
 // ─── INVITES ───────────────────────────────────────────────────────────────────
 
-function addInvite(inviterId, invitedId) {
-  db.prepare('INSERT OR IGNORE INTO invites (inviterId, invitedId, left) VALUES (?, ?, 0)').run(inviterId, invitedId);
+async function addInvite(inviterId, invitedId) {
+  await db.execute({ sql: 'INSERT OR IGNORE INTO invites (inviterId, invitedId, left) VALUES (?, ?, 0)', args: [inviterId, invitedId] });
 }
 
-function removeInvitedMember(invitedId) {
-  // Marque la personne comme partie (invite ne compte plus)
-  db.prepare('UPDATE invites SET left = 1 WHERE invitedId = ?').run(invitedId);
+async function removeInvitedMember(invitedId) {
+  await db.execute({ sql: 'UPDATE invites SET left = 1 WHERE invitedId = ?', args: [invitedId] });
 }
 
-function getInvites(inviterId) {
-  const total = db.prepare('SELECT COUNT(*) as count FROM invites WHERE inviterId = ?').get(inviterId).count;
-  const left  = db.prepare('SELECT COUNT(*) as count FROM invites WHERE inviterId = ? AND left = 1').get(inviterId).count;
-  return { total, left, valid: total - left };
+async function getInvites(inviterId) {
+  const total = await db.execute({ sql: 'SELECT COUNT(*) as count FROM invites WHERE inviterId = ?', args: [inviterId] });
+  const left  = await db.execute({ sql: 'SELECT COUNT(*) as count FROM invites WHERE inviterId = ? AND left = 1', args: [inviterId] });
+  const t = Number(total.rows[0].count);
+  const l = Number(left.rows[0].count);
+  return { total: t, left: l, valid: t - l };
 }
 
-function getInviteLeaderboard(limit = 10) {
-  return db.prepare(`
-    SELECT inviterId,
-      COUNT(*) as total,
-      SUM(left) as left,
-      COUNT(*) - SUM(left) as valid
-    FROM invites
-    GROUP BY inviterId
-    ORDER BY valid DESC
-    LIMIT ?
-  `).all(limit);
+async function getInviteLeaderboard(limit = 10) {
+  const res = await db.execute({
+    sql: `SELECT inviterId,
+            COUNT(*) as total,
+            SUM(left) as left,
+            COUNT(*) - SUM(left) as valid
+          FROM invites
+          GROUP BY inviterId
+          ORDER BY valid DESC
+          LIMIT ?`,
+    args: [limit],
+  });
+  return res.rows;
 }
 
-function getInviteRank(inviterId) {
-  const rows = db.prepare(`
-    SELECT inviterId, COUNT(*) - SUM(left) as valid
-    FROM invites GROUP BY inviterId ORDER BY valid DESC
-  `).all();
-  const idx = rows.findIndex(r => r.inviterId === inviterId);
+async function getInviteRank(inviterId) {
+  const res = await db.execute({
+    sql: `SELECT inviterId, COUNT(*) - SUM(left) as valid
+          FROM invites GROUP BY inviterId ORDER BY valid DESC`,
+    args: [],
+  });
+  const idx = res.rows.findIndex(r => r.inviterId === inviterId);
   return idx === -1 ? null : idx + 1;
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  initDB,
   getWarns, addWarn, clearWarns, getWarnCount,
   getXP, addXP, setLevel, getLeaderboard, getRank,
   createTicket, getTicket, getUserOpenTicket, closeTicketDB,
