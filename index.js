@@ -177,6 +177,12 @@ const slashCommands = [
     .setName('invite').setDescription('Voir les invitations')
     .addSubcommand(sub => sub.setName('stats').setDescription('Voir les invites d\'un membre').addUserOption(o => o.setName('user').setDescription('Membre (optionnel)')))
     .addSubcommand(sub => sub.setName('panel').setDescription('Classement top 10 invites')),
+
+  new SlashCommandBuilder()
+    .setName('giveaway').setDescription('Lancer un giveaway')
+    .addStringOption(o => o.setName('duree').setDescription('Durée ex: 10m 2h 1d').setRequired(true))
+    .addStringOption(o => o.setName('prix').setDescription('Prix du giveaway').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Rôle requis pour participer (optionnel)')),
 ].map(cmd => cmd.toJSON());
 
 // ─── EMBED BUILDER HELPERS ─────────────────────────────────────────────────────
@@ -1632,6 +1638,63 @@ client.on('interactionCreate', async interaction => {
       )]
     });
     interaction.reply({ content: "✅ Panel envoyé !", ephemeral: true });
+  }
+
+  // /giveaway
+  else if (commandName === 'giveaway') {
+    if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
+    const rawDuration = interaction.options.getString('duree');
+    const prize       = interaction.options.getString('prix');
+    const role        = interaction.options.getRole('role');
+    const ms          = parseDuration(rawDuration);
+    if (!ms) return interaction.reply({ content: "❌ Durée invalide. Formats : `30s` `10m` `2h` `1d`", ephemeral: true });
+
+    const endsAt   = new Date(Date.now() + ms);
+    const endsUnix = Math.floor(endsAt.getTime() / 1000);
+
+    await interaction.reply({ content: "✅ Giveaway lancé !", ephemeral: true });
+
+    const gwMsg = await interaction.channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle("🎉  GIVEAWAY")
+        .setDescription(
+          `**Prix :** ${prize}\n\nRéagis avec 🎉 pour participer !` +
+          (role ? `\n\n⚠️ Rôle requis : <@&${role.id}>` : '') +
+          `\n\n**Fin :** <t:${endsUnix}:R> (<t:${endsUnix}:T>)`
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: `Lancé par ${interaction.user.tag} • 1 gagnant` })
+        .setTimestamp(endsAt)
+      ]
+    });
+    await gwMsg.react("🎉");
+    shared.activeGiveaways.set(gwMsg.id, { prize, requiredRoleId: role?.id || null, channelId: interaction.channel.id, messageId: gwMsg.id, endsAt: endsAt.toISOString(), launchedBy: interaction.user.tag });
+
+    setTimeout(async () => {
+      shared.activeGiveaways.delete(gwMsg.id);
+      try {
+        const fetched  = await gwMsg.fetch();
+        const reaction = fetched.reactions.cache.get("🎉");
+        if (!reaction) return interaction.channel.send("❌ Impossible de récupérer les réactions.");
+        const users  = await reaction.users.fetch();
+        let eligible = users.filter(u => !u.bot);
+        if (role) {
+          const checks = await Promise.all([...eligible.values()].map(async u => {
+            const m = await getMember(interaction.guild, u.id);
+            return m?.roles.cache.has(role.id) ? u : null;
+          }));
+          eligible = eligible.filter((_, i) => checks[i] !== null);
+        }
+        if (eligible.size === 0) {
+          const noWinEmbed = new EmbedBuilder().setTitle("😢 Giveaway terminé").setDescription(`**Prix :** ${prize}\n\nPersonne d'éligible.`).setColor(0xE24B4A);
+          await gwMsg.edit({ embeds: [noWinEmbed] });
+          return interaction.channel.send({ embeds: [noWinEmbed] });
+        }
+        const winner = eligible.random();
+        await gwMsg.edit({ embeds: [new EmbedBuilder().setTitle("🎉 GIVEAWAY — TERMINÉ").setDescription(`**Prix :** ${prize}\n\n**Gagnant :** <@${winner.id}>`).setColor(0x57F287).setFooter({ text: `Lancé par ${interaction.user.tag}` }).setTimestamp()] });
+        interaction.channel.send({ content: `<@${winner.id}>`, embeds: [new EmbedBuilder().setTitle("🎊 Félicitations !").setDescription(`<@${winner.id}> remporte **${prize}** !`).setColor(0x57F287)] });
+      } catch (err) { console.error('[GIVEAWAY SLASH]', err); }
+    }, ms);
   }
 
   // /invite
