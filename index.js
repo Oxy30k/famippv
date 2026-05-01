@@ -18,6 +18,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildInvites,
   ],
 });
 
@@ -75,7 +76,10 @@ const AUTOMOD = {
   antiAlt:         true,
 };
 
-// ─── AUTOMOD DATA ──────────────────────────────────────────────────────────────
+// ─── INVITE TRACKING ──────────────────────────────────────────────────────────
+
+const inviteCache = new Map(); // code → uses (snapshot au ready + màj live)
+
 
 const spamTracker  = new Map(); // userId → { count, firstMsg }
 const snipeData    = new Map(); // channelId → { author, content, timestamp }
@@ -168,6 +172,11 @@ const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('ticket').setDescription('Envoyer le panel de tickets'),
+
+  new SlashCommandBuilder()
+    .setName('invite').setDescription('Voir les invitations')
+    .addSubcommand(sub => sub.setName('stats').setDescription('Voir les invites d\'un membre').addUserOption(o => o.setName('user').setDescription('Membre (optionnel)')))
+    .addSubcommand(sub => sub.setName('panel').setDescription('Classement top 10 invites')),
 ].map(cmd => cmd.toJSON());
 
 // ─── EMBED BUILDER HELPERS ─────────────────────────────────────────────────────
@@ -217,6 +226,15 @@ function buildControlButtons(session) {
 
 client.on('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+
+  // Cache des invites au démarrage
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const invites = await guild.invites.fetch();
+      invites.forEach(inv => inviteCache.set(inv.code, inv.uses));
+    } catch {}
+  }
+
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   try {
     for (const guild of client.guilds.cache.values()) {
@@ -226,6 +244,16 @@ client.on('ready', async () => {
   } catch (err) {
     console.error('[SLASH REGISTER]', err);
   }
+});
+
+// ─── INVITE EVENTS ─────────────────────────────────────────────────────────────
+
+client.on('inviteCreate', invite => {
+  inviteCache.set(invite.code, invite.uses ?? 0);
+});
+
+client.on('inviteDelete', invite => {
+  inviteCache.delete(invite.code);
 });
 
 // ─── AUTO ROLE AU PING ─────────────────────────────────────────────────────────
@@ -435,6 +463,16 @@ client.on('guildMemberAdd', async member => {
     }
   }
 
+  // ── TRACKING INVITE ───────────────────────────────────────────────────────
+  try {
+    const newInvites = await member.guild.invites.fetch();
+    const usedInvite = newInvites.find(inv => (inviteCache.get(inv.code) ?? 0) < inv.uses);
+    if (usedInvite && usedInvite.inviter) {
+      db.addInvite(usedInvite.inviter.id, member.id);
+    }
+    newInvites.forEach(inv => inviteCache.set(inv.code, inv.uses));
+  } catch (err) { console.error('[INVITE TRACK]', err); }
+
   // ── LOG JOIN ──────────────────────────────────────────────────────────────
   if (!logChannel) return;
   logChannel.send({ embeds: [new EmbedBuilder()
@@ -453,6 +491,9 @@ client.on('guildMemberAdd', async member => {
 });
 
 client.on('guildMemberRemove', async member => {
+  // Décrémenter les invites si le membre quitte
+  db.removeInvitedMember(member.id);
+
   const logChannel = getLogChannel();
   if (!logChannel) return;
   const roles = member.roles.cache.filter(r => r.id !== member.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'Aucun';
@@ -787,6 +828,47 @@ client.on('messageCreate', async message => {
       .setTitle('🏆 Classement XP du serveur')
       .setColor(0x5865F2)
       .setDescription(lines.join('\n'))
+      .setTimestamp()
+    ]});
+  }
+
+  // ── Invite stats : commande publique ─────────────────────────────────────
+  if (cmd === "invite" && args[2] !== "panel") {
+    const targetId = args[2]?.replace(/[<@!>]/g, '') || message.author.id;
+    try {
+      const user      = await client.users.fetch(targetId);
+      const invData   = db.getInvites(targetId);
+      const rankInv   = db.getInviteRank(targetId);
+      return message.reply({ embeds: [new EmbedBuilder()
+        .setTitle(`📨 Invitations de ${user.tag}`)
+        .setThumbnail(user.displayAvatarURL({ size: 128 }))
+        .setColor(0x5865F2)
+        .addFields(
+          { name: 'Rang',              value: rankInv ? `#${rankInv}` : 'Non classé', inline: true },
+          { name: '✅ Invites valides', value: `${invData.valid}`,                     inline: true },
+          { name: '❌ Partis',         value: `${invData.left}`,                       inline: true },
+        )
+        .setFooter({ text: 'Seules les invites de membres toujours présents comptent' })
+        .setTimestamp()
+      ]});
+    } catch { return message.reply("❌ Impossible de récupérer les données."); }
+  }
+
+  // ── Invite panel : commande publique ──────────────────────────────────────
+  if (cmd === "invite" && args[2] === "panel") {
+    const top = db.getInviteLeaderboard(10);
+    if (!top.length) return message.reply("❌ Aucune donnée d'invitation pour l'instant.");
+    const lines = await Promise.all(top.map(async (row, i) => {
+      let tag = row.inviterId;
+      try { const u = await client.users.fetch(row.inviterId); tag = u.tag; } catch {}
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
+      return `${medal} ${tag} — **${row.valid}** invite${row.valid > 1 ? 's' : ''} valide${row.valid > 1 ? 's' : ''}`;
+    }));
+    return message.reply({ embeds: [new EmbedBuilder()
+      .setTitle('📨 Classement des invitations')
+      .setColor(0x5865F2)
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: 'Top 10 • Invites valides uniquement (membres toujours présents)' })
       .setTimestamp()
     ]});
   }
@@ -1536,6 +1618,47 @@ client.on('interactionCreate', async interaction => {
       )]
     });
     interaction.reply({ content: "✅ Panel envoyé !", ephemeral: true });
+  }
+
+  // /invite
+  else if (commandName === 'invite') {
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'stats') {
+      const user    = interaction.options.getUser('user') || interaction.user;
+      const invData = db.getInvites(user.id);
+      const rankInv = db.getInviteRank(user.id);
+      return interaction.reply({ embeds: [new EmbedBuilder()
+        .setTitle(`📨 Invitations de ${user.tag}`)
+        .setThumbnail(user.displayAvatarURL({ size: 128 }))
+        .setColor(0x5865F2)
+        .addFields(
+          { name: 'Rang',              value: rankInv ? `#${rankInv}` : 'Non classé', inline: true },
+          { name: '✅ Invites valides', value: `${invData.valid}`,                     inline: true },
+          { name: '❌ Partis',         value: `${invData.left}`,                       inline: true },
+        )
+        .setFooter({ text: 'Seules les invites de membres toujours présents comptent' })
+        .setTimestamp()
+      ]});
+    }
+
+    if (sub === 'panel') {
+      const top = db.getInviteLeaderboard(10);
+      if (!top.length) return interaction.reply({ content: "❌ Aucune donnée d'invitation pour l'instant.", ephemeral: true });
+      const lines = await Promise.all(top.map(async (row, i) => {
+        let tag = row.inviterId;
+        try { const u = await client.users.fetch(row.inviterId); tag = u.tag; } catch {}
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
+        return `${medal} ${tag} — **${row.valid}** invite${row.valid > 1 ? 's' : ''} valide${row.valid > 1 ? 's' : ''}`;
+      }));
+      return interaction.reply({ embeds: [new EmbedBuilder()
+        .setTitle('📨 Classement des invitations')
+        .setColor(0x5865F2)
+        .setDescription(lines.join('\n'))
+        .setFooter({ text: 'Top 10 • Invites valides uniquement' })
+        .setTimestamp()
+      ]});
+    }
   }
 });
 
