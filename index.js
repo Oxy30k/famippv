@@ -43,19 +43,6 @@ const LIVE_CHANNEL_ID = "1496971161295388792";
 const TICKET_CATEGORY = "1498931758022791250";
 const TICKET_LOG_CH   = "1499329165621461023";
 
-// ─── XP CONFIG ─────────────────────────────────────────────────────────────────
-
-const XP_COOLDOWN_MS = 60_000; // 1 minute entre chaque gain XP
-const xpCooldown     = new Map(); // userId → timestamp dernier XP
-
-// Rôles récompensés par niveau : { niveau: 'roleId' }
-// Exemple : 5: "1234567890" pour donner un rôle au niveau 5
-const XP_LEVEL_ROLES = {
-  // 5:  "ROLE_ID",
-  // 10: "ROLE_ID",
-  // 20: "ROLE_ID",
-};
-
 // ─── ANTI-RAID CONFIG ──────────────────────────────────────────────────────────
 
 const raidJoins     = []; // timestamps des derniers joins
@@ -105,11 +92,6 @@ function parseDuration(str) {
   return val * units[match[2]];
 }
 
-// XP nécessaire pour passer au niveau N
-function xpForLevel(level) {
-  return 5 * level * level + 50 * level + 100;
-}
-
 // ─── SLASH COMMANDS DÉFINITIONS ────────────────────────────────────────────────
 
 const slashCommands = [
@@ -157,13 +139,6 @@ const slashCommands = [
     .setName('clear').setDescription('Supprimer des messages')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
     .addIntegerOption(o => o.setName('nombre').setDescription('Nombre (1-100)').setRequired(true).setMinValue(1).setMaxValue(100)),
-
-  new SlashCommandBuilder()
-    .setName('rank').setDescription('Voir le rang XP')
-    .addUserOption(o => o.setName('user').setDescription('Membre (optionnel)')),
-
-  new SlashCommandBuilder()
-    .setName('top').setDescription('Voir le classement XP du serveur'),
 
   new SlashCommandBuilder()
     .setName('userinfo').setDescription("Infos sur un membre")
@@ -396,19 +371,36 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   ]}).catch(console.error);
 });
 
-// ─── LOGS : RÔLES ──────────────────────────────────────────────────────────────
+// ─── BOOST NOTIF ───────────────────────────────────────────────────────────────
+
+const BOOST_CHANNEL_ID = "1505049293902315610";
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  // Boost détecté
+  const wasBoosting = oldMember.premiumSince;
+  const isBoosting  = newMember.premiumSince;
+  if (!wasBoosting && isBoosting) {
+    const ch = client.channels.cache.get(BOOST_CHANNEL_ID);
+    if (ch) {
+      ch.send({
+        content: `<@${newMember.id}>`,
+        embeds: [new EmbedBuilder()
+          .setTitle('🚀 Merci du boost !')
+          .setDescription(`Merci <@${newMember.id}> pour le boost du serveur ! 💜\nTu es maintenant un booster officiel de **oxy30k** 🔥`)
+          .setColor(0xF47FFF)
+          .setThumbnail(newMember.user.displayAvatarURL({ size: 128 }))
+          .setTimestamp()
+        ]
+      }).catch(console.error);
+    }
+  }
+
+  // Changements de rôles (logs existants)
   const logChannel = getLogChannel();
   if (!logChannel) return;
   const added   = newMember.roles.cache.filter(r => !oldMember.roles.cache.has(r.id));
   const removed = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
   if (added.size === 0 && removed.size === 0) return;
-  shared.addLog('roles', {
-    member: newMember.user.tag, memberId: newMember.id,
-    added: [...added.values()].map(r => r.name),
-    removed: [...removed.values()].map(r => r.name),
-  });
   const lines = [];
   added.forEach(r   => lines.push(`➕ **${r.name}** (<@&${r.id}>)`));
   removed.forEach(r => lines.push(`➖ **${r.name}** (<@&${r.id}>)`));
@@ -726,46 +718,6 @@ client.on('messageCreate', async message => {
   }
 });
 
-// ─── XP SYSTEM ─────────────────────────────────────────────────────────────────
-
-client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
-
-  const userId = message.author.id;
-  const now    = Date.now();
-
-  // Cooldown XP : 1 message par minute max
-  if (xpCooldown.has(userId) && now - xpCooldown.get(userId) < XP_COOLDOWN_MS) return;
-  xpCooldown.set(userId, now);
-
-  const xpGain   = Math.floor(Math.random() * 11) + 15; // 15-25 XP aléatoire
-  const userData = await db.addXP(userId, xpGain);
-
-  // Vérification level up
-  const nextLevelXP = xpForLevel(userData.level + 1);
-  if (userData.xp >= nextLevelXP) {
-    const newLevel = userData.level + 1;
-    await db.setLevel(userId, newLevel);
-
-    message.channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('🎉 Level Up !')
-        .setDescription(`GG <@${userId}> ! Tu passes au niveau **${newLevel}** 🚀`)
-        .setColor(0x5865F2)
-        .setThumbnail(message.author.displayAvatarURL({ size: 64 }))
-        .setTimestamp()
-      ]
-    }).then(m => setTimeout(() => m.delete().catch(() => {}), 10_000)).catch(() => {});
-
-    // Rôle récompense si configuré
-    if (XP_LEVEL_ROLES[newLevel]) {
-      const levelRole = message.guild.roles.cache.get(XP_LEVEL_ROLES[newLevel]);
-      if (levelRole && message.member) await message.member.roles.add(levelRole).catch(() => {});
-    }
-  }
-});
-
 // ─── COMMANDES PREFIX ──────────────────────────────────────────────────────────
 
 client.on('messageCreate', async message => {
@@ -810,48 +762,6 @@ client.on('messageCreate', async message => {
       .setColor(0x5865F2)
       .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
       .setFooter({ text: "oxy bot • custom made • privé" })
-      .setTimestamp()
-    ]});
-  }
-
-  // ── Rank : commande publique ──────────────────────────────────────────────
-  if (cmd === "rank") {
-    const targetId = args[2]?.replace(/[<@!>]/g, '') || message.author.id;
-    try {
-      const user       = await client.users.fetch(targetId);
-      const xpData     = await db.getXP(targetId);
-      const rank       = await db.getRank(targetId);
-      const nextLvlXP  = xpForLevel(xpData.level + 1);
-      const progress   = Math.min(Math.floor((xpData.xp / nextLvlXP) * 20), 20);
-      const bar        = '█'.repeat(progress) + '░'.repeat(20 - progress);
-      return message.reply({ embeds: [new EmbedBuilder()
-        .setTitle(`🏆 Rang de ${user.tag}`)
-        .setThumbnail(user.displayAvatarURL({ size: 128 }))
-        .setColor(0x5865F2)
-        .addFields(
-          { name: 'Rang',        value: rank ? `#${rank}` : 'Non classé', inline: true },
-          { name: 'Niveau',      value: `${xpData.level}`, inline: true },
-          { name: 'XP',          value: `${xpData.xp} / ${nextLvlXP}`, inline: true },
-          { name: 'Progression', value: `\`${bar}\`` }
-        ).setTimestamp()
-      ]});
-    } catch { return message.reply("❌ Impossible de récupérer les données."); }
-  }
-
-  // ── Top : commande publique ───────────────────────────────────────────────
-  if (cmd === "top") {
-    const top = await db.getLeaderboard(10);
-    if (!top.length) return message.reply("❌ Aucune donnée XP pour l'instant.");
-    const lines = await Promise.all(top.map(async (row, i) => {
-      let tag = row.userId;
-      try { const u = await client.users.fetch(row.userId); tag = u.tag; } catch {}
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
-      return `${medal} ${tag} — Niveau **${row.level}** | ${row.xp} XP`;
-    }));
-    return message.reply({ embeds: [new EmbedBuilder()
-      .setTitle('🏆 Classement XP du serveur')
-      .setColor(0x5865F2)
-      .setDescription(lines.join('\n'))
       .setTimestamp()
     ]});
   }
@@ -1289,6 +1199,31 @@ client.on('messageCreate', async message => {
       break;
     }
 
+    // ── REROLL GW ────────────────────────────────────────────────────────────
+    case "reroll": {
+      const msgId = args[2];
+      if (!msgId) return missingArg(message, "Usage : `oxy reroll <messageId>`");
+      try {
+        const gwMsg  = await message.channel.messages.fetch(msgId);
+        const reaction = gwMsg.reactions.cache.get("🎉");
+        if (!reaction) return message.reply("❌ Aucune réaction 🎉 trouvée sur ce message.");
+        const users  = await reaction.users.fetch();
+        const eligible = users.filter(u => !u.bot);
+        if (!eligible.size) return message.reply("❌ Aucun participant éligible.");
+        const winner = eligible.random();
+        message.channel.send({
+          content: `<@${winner.id}>`,
+          embeds: [new EmbedBuilder()
+            .setTitle("🎲 Reroll — Nouveau gagnant !")
+            .setDescription(`<@${winner.id}> est le nouveau gagnant ! 🎉`)
+            .setColor(0x5865F2)
+            .setTimestamp()
+          ]
+        });
+      } catch (err) { message.reply(`❌ Impossible de reroll : \`${err.message}\``); }
+      break;
+    }
+
     // ── GIVEAWAY ─────────────────────────────────────────────────────────────
     case "gw": {
       const rawDuration = args[2];
@@ -1407,14 +1342,9 @@ client.on('messageCreate', async message => {
             "`oxy dmall <message>` — DM tous les membres",
           ].join("\n")},
           { name: "ℹ️ Infos", value: [
-            "`oxy userinfo <id>` — Infos + warns + XP",
+            "`oxy userinfo <id>` — Infos + warns",
             "`oxy serverinfo` — Infos du serveur",
             "`oxy snipe` — Dernier msg supprimé",
-          ].join("\n")},
-          { name: "🏆 XP & Levels (public)", value: [
-            "`oxy rank [@user]` — Voir son rang XP",
-            "`oxy top` — Classement XP du serveur",
-            "*XP gagné en parlant • cooldown 1 min*",
           ].join("\n")},
           { name: "🎫 Tickets", value: [
             "`oxy ticket` — Envoyer le panel de tickets",
@@ -1437,6 +1367,7 @@ client.on('messageCreate', async message => {
           { name: "🎉 Giveaway", value: [
             "`oxy gw <durée> <prix>` — Giveaway ouvert à tous",
             "`oxy gw <durée> <prix> --role <roleId>` — Avec rôle requis",
+            "`oxy reroll <messageId>` — Reroll un giveaway terminé",
             "*Durées : `30s` `10m` `2h` `1d`*",
           ].join("\n")},
           { name: "🔧 Utilitaire", value: [
@@ -1450,7 +1381,8 @@ client.on('messageCreate', async message => {
           { name: "⚡ Slash Commands", value: [
             "`/ban` `/kick` `/mute` `/unmute` `/warn`",
             "`/warns` `/clearwarn` `/clear`",
-            "`/rank` `/top` `/userinfo` `/ticket`",
+            "`/userinfo` `/ticket` `/giveaway`",
+            "`/invite stats` `/invite panel`",
           ].join("\n")},
         )
         .setFooter({ text: "oxy bot • Owners uniquement sauf info / rank / top" })
@@ -1560,51 +1492,11 @@ client.on('interactionCreate', async interaction => {
     } catch (err) { interaction.reply({ content: `❌ \`${err.message}\``, ephemeral: true }); }
   }
 
-  // /rank
-  else if (commandName === 'rank') {
-    const user      = interaction.options.getUser('user') || interaction.user;
-    const xpData    = await db.getXP(user.id);
-    const rank      = await db.getRank(user.id);
-    const nextLvlXP = xpForLevel(xpData.level + 1);
-    const progress  = Math.min(Math.floor((xpData.xp / nextLvlXP) * 20), 20);
-    const bar       = '█'.repeat(progress) + '░'.repeat(20 - progress);
-    interaction.reply({ embeds: [new EmbedBuilder()
-      .setTitle(`🏆 Rang de ${user.tag}`)
-      .setThumbnail(user.displayAvatarURL({ size: 128 }))
-      .setColor(0x5865F2)
-      .addFields(
-        { name: 'Rang',        value: rank ? `#${rank}` : 'Non classé', inline: true },
-        { name: 'Niveau',      value: `${xpData.level}`, inline: true },
-        { name: 'XP',          value: `${xpData.xp} / ${nextLvlXP}`, inline: true },
-        { name: 'Progression', value: `\`${bar}\`` }
-      ).setTimestamp()
-    ]});
-  }
-
-  // /top
-  else if (commandName === 'top') {
-    const top = await db.getLeaderboard(10);
-    if (!top.length) return interaction.reply({ content: "❌ Aucune donnée XP.", ephemeral: true });
-    const lines = await Promise.all(top.map(async (row, i) => {
-      let tag = row.userId;
-      try { const u = await client.users.fetch(row.userId); tag = u.tag; } catch {}
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
-      return `${medal} ${tag} — Niveau **${row.level}** | ${row.xp} XP`;
-    }));
-    interaction.reply({ embeds: [new EmbedBuilder()
-      .setTitle('🏆 Classement XP du serveur')
-      .setColor(0x5865F2)
-      .setDescription(lines.join('\n'))
-      .setTimestamp()
-    ]});
-  }
-
   // /userinfo
   else if (commandName === 'userinfo') {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "ftg", ephemeral: true });
     const user      = interaction.options.getUser('user');
     const member    = await getMember(interaction.guild, user.id);
-    const xpData    = await db.getXP(user.id);
     const warnCount = await db.getWarnCount(user.id);
     const embed     = new EmbedBuilder()
       .setTitle(`👤 ${user.tag}`)
@@ -1613,7 +1505,6 @@ client.on('interactionCreate', async interaction => {
       .addFields(
         { name: "ID",             value: user.id,                                              inline: true },
         { name: "Warns",          value: `${warnCount}`,                                       inline: true },
-        { name: "XP",             value: `${xpData.xp} XP | Niv. ${xpData.level}`,            inline: true },
         { name: "Compte créé le", value: `<t:${Math.floor(user.createdTimestamp / 1000)}:D>`, inline: true },
       );
     if (member) {
